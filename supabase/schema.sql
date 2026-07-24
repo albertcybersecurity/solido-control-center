@@ -234,3 +234,73 @@ drop policy if exists "attachments_delete" on storage.objects;
 create policy "attachments_delete" on storage.objects for delete to authenticated using (
   bucket_id = 'attachments' and (select private.is_admin())
 );
+
+-- ============================================================================
+-- AGREGADO: un colaborador puede tener tareas asignadas dentro de un proyecto
+-- de otro responsable (ej. "logotipo" asignado a Fabiola dentro de un proyecto
+-- que administra Daniel). Para que esa persona pueda ver el proyecto y la
+-- empresa (y así llegar al botón "Tareas"), ampliamos el acceso de lectura.
+-- ============================================================================
+
+-- IMPORTANTE: la política de "projects" abajo consulta "tasks", y la política de
+-- "tasks" (tasks_collaborator_all_own, arriba) consulta "projects". Si ambas se
+-- consultan directamente entre sí, Postgres entra en "infinite recursion detected
+-- in policy" al evaluar cualquiera de las dos. Por eso el lado de "projects" pasa
+-- por esta función SECURITY DEFINER, que evalúa "tasks" salteándose su RLS (el
+-- dueño de la función controla las tablas) y así rompe el ciclo.
+create or replace function private.user_has_task_in_project(p_project_id uuid)
+returns boolean
+language sql stable security definer set search_path = public as $$
+  select exists(select 1 from public.tasks t where t.project_id = p_project_id and t.assigned_to = auth.uid());
+$$;
+revoke all on function private.user_has_task_in_project(uuid) from public;
+grant execute on function private.user_has_task_in_project(uuid) to authenticated;
+
+drop policy if exists "projects_collaborator_select_own" on public.projects;
+create policy "projects_collaborator_select_own" on public.projects for select to authenticated using (
+  assigned_to=(select auth.uid())
+  or private.user_has_task_in_project(projects.id)
+);
+
+drop policy if exists "companies_collaborator_select_assigned" on public.companies;
+create policy "companies_collaborator_select_assigned" on public.companies for select to authenticated using (
+  exists(
+    select 1 from public.projects p
+    where p.company_id=companies.id
+    and (p.assigned_to=(select auth.uid()) or private.user_has_task_in_project(p.id))
+  )
+);
+
+-- ============================================================================
+-- AGREGADO: monto acordado con el colaborador por proyecto (distinto del monto
+-- cobrado al cliente), y alertas simples (se reutiliza la tabla "activities" ya
+-- existente). Cualquier usuario autenticado puede registrar una alerta para
+-- OTRA persona (ej. un admin le avisa a un colaborador que le asignó una tarea
+-- o le registró un pago); cada quien solo ve las suyas salvo administradores,
+-- que ya veían todas.
+-- ============================================================================
+
+alter table public.projects add column if not exists collaborator_budget numeric(14,2) not null default 0;
+
+drop policy if exists "activities_insert_own" on public.activities;
+drop policy if exists "activities_insert_any" on public.activities;
+create policy "activities_insert_any" on public.activities for insert to authenticated with check (true);
+
+-- ============================================================================
+-- AGREGADO: un colaborador ahora puede ver proyectos/tareas de otras personas
+-- (ver más arriba), pero "profiles_select_own_or_admin" solo deja ver el PROPIO
+-- perfil. Sin esto, cualquier nombre que no sea el suyo se mostraba como
+-- "Sin asignar" en la lista de tareas o en "Responsable", y tampoco podía
+-- elegir a un compañero al asignar una tarea nueva (el selector solo se veía a
+-- sí mismo). Esta función solo expone id + nombre completo (nada de email,
+-- usuario ni rol) de la gente activa, para que la interfaz pueda mostrar y
+-- elegir nombres correctamente sin abrir el resto del perfil de nadie.
+-- ============================================================================
+
+create or replace function public.directory_names()
+returns table(id uuid, full_name text)
+language sql stable security definer set search_path = public as $$
+  select id, full_name from public.profiles where active = true;
+$$;
+revoke all on function public.directory_names() from public;
+grant execute on function public.directory_names() to authenticated;
