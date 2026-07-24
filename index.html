@@ -6,7 +6,7 @@
   <meta name="theme-color" content="#063f2a" />
   <title>Sólido Control Center</title>
   <meta name="description" content="Panel privado para controlar empresas, proyectos, extras y pagos de Sólido Business Group." />
-  <link rel="stylesheet" href="assets/styles.css?v=20260724j" />
+  <link rel="stylesheet" href="assets/styles.css?v=20260724k" />
 </head>
 <body>
   <div id="toastStack" class="toast-stack" aria-live="polite"></div>
@@ -128,7 +128,29 @@
             <div id="notifDropdown" class="notif-dropdown hidden">
               <div class="notif-dropdown-head">
                 <strong>Notificaciones</strong>
-                <button id="notifEnableBtn" class="text-action hidden" type="button">Activar avisos en este dispositivo</button>
+                <div class="notif-head-actions">
+                  <button id="notifEnableBtn" class="text-action hidden" type="button">Activar en este dispositivo</button>
+                  <button id="notifPrefsBtn" class="icon-button-sm" type="button" aria-label="Preferencias de notificaciones">⚙</button>
+                </div>
+              </div>
+              <div id="notifPrefsPanel" class="notif-prefs-panel hidden">
+                <label class="notif-pref-row notif-pref-master">
+                  <span>Recibir notificaciones</span>
+                  <input type="checkbox" id="notifPrefEnabled">
+                </label>
+                <label class="notif-pref-row">
+                  <span>Tareas</span>
+                  <input type="checkbox" id="notifPrefTasks">
+                </label>
+                <label class="notif-pref-row">
+                  <span>Pagos</span>
+                  <input type="checkbox" id="notifPrefPayments">
+                </label>
+                <label class="notif-pref-row">
+                  <span>Proyectos nuevos</span>
+                  <input type="checkbox" id="notifPrefProjects">
+                </label>
+                <p class="notif-prefs-hint">Estas preferencias controlan tanto los avisos en este panel como las notificaciones push a tu celular o laptop.</p>
               </div>
               <div id="notifList" class="notif-list"></div>
             </div>
@@ -336,7 +358,7 @@
     </div>
   </div>
 
-  <script src="assets/config.js?v=20260724d"></script>
-  <script src="assets/app.js?v=20260724m"></script>
+  <script src="assets/config.js?v=20260724e"></script>
+  <script src="assets/app.js?v=20260724n"></script>
 </body>
 </html>
