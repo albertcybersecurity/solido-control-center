@@ -136,10 +136,11 @@
     async upsert(table,record,recordId=null){
       const realTable = table === "extras" ? "project_extras" : table;
       const query = recordId
-        ? supabaseClient.from(realTable).update({...record,updated_at:new Date().toISOString()}).eq("id",recordId)
-        : supabaseClient.from(realTable).insert(record);
-      const {error} = await query;
+        ? supabaseClient.from(realTable).update({...record,updated_at:new Date().toISOString()}).eq("id",recordId).select("id").single()
+        : supabaseClient.from(realTable).insert(record).select("id").single();
+      const {data,error} = await query;
       if (error) throw error;
+      return data?.id;
     },
     async remove(table,id){
       const realTable = table === "extras" ? "project_extras" : table;
@@ -150,6 +151,36 @@
       const {data,error} = await supabaseClient.functions.invoke(CONFIG.CREATE_USER_FUNCTION || "create-user",{body:payload});
       if (error) throw error;
       if (data?.error) throw new Error(data.error);
+    },
+    async uploadReceipt(paymentId,file){
+      const path = `${paymentId}/${Date.now()}-${file.name}`.replace(/\s+/g,"_");
+      const {error} = await supabaseClient.storage.from("attachments").upload(path,file,{upsert:true});
+      if (error) throw error;
+      const {error:updateError} = await supabaseClient.from("payments").update({receipt_path:path,receipt_name:file.name,updated_at:new Date().toISOString()}).eq("id",paymentId);
+      if (updateError) throw updateError;
+      return path;
+    },
+    async getReceiptUrl(path){
+      const {data,error} = await supabaseClient.storage.from("attachments").createSignedUrl(path,3600);
+      if (error) throw error;
+      return data.signedUrl;
+    },
+    async loadTasks(projectId){
+      const {data,error} = await supabaseClient.from("tasks").select("*").eq("project_id",projectId).order("created_at",{ascending:true});
+      if (error) throw error;
+      return data || [];
+    },
+    async createTask(projectId,title){
+      const {error} = await supabaseClient.from("tasks").insert({project_id:projectId,title,created_by:state.profile.id,assigned_to:state.profile.id});
+      if (error) throw error;
+    },
+    async toggleTask(id,done){
+      const {error} = await supabaseClient.from("tasks").update({done,updated_at:new Date().toISOString()}).eq("id",id);
+      if (error) throw error;
+    },
+    async deleteTask(id){
+      const {error} = await supabaseClient.from("tasks").delete().eq("id",id);
+      if (error) throw error;
     }
   };
 
@@ -433,7 +464,7 @@
     });
     $("#projectsTable").innerHTML = rows.length ? rows.map(p=>{
       const total=projectTotalAmount(p);
-      return `<tr><td class="row-title"><strong>${esc(p.title)}</strong><small>${esc(p.work_type||"")}</small></td><td>${esc(companyName(p.company_id))}</td><td>${esc(userName(p.assigned_to))}</td><td><span class="status-chip ${statusClass(p.status)}">${statusLabel(p.status)}</span></td><td>${isAdmin()?`${formatMoney(total,p.currency)}<br><small class="muted">Pagado: ${formatMoney(p.client_paid,p.currency)}</small>`:'<span class="status-chip">Información administrativa</span>'}</td><td>${formatDate(p.due_date)}</td><td>${isAdmin()?`<button class="btn outline" data-action="edit-project" data-id="${p.id}">Editar</button> <button class="btn danger" data-action="delete-project" data-id="${p.id}">Eliminar</button>`:"—"}</td></tr>`;
+      return `<tr><td class="row-title"><strong>${esc(p.title)}</strong><small>${esc(p.work_type||"")}</small></td><td>${esc(companyName(p.company_id))}</td><td>${esc(userName(p.assigned_to))}</td><td><span class="status-chip ${statusClass(p.status)}">${statusLabel(p.status)}</span></td><td>${isAdmin()?`${formatMoney(total,p.currency)}<br><small class="muted">Pagado: ${formatMoney(p.client_paid,p.currency)}</small>`:'<span class="status-chip">Información administrativa</span>'}</td><td>${formatDate(p.due_date)}</td><td><button class="btn outline" data-action="view-tasks" data-id="${p.id}">Tareas</button> ${isAdmin()?`<button class="btn outline" data-action="edit-project" data-id="${p.id}">Editar</button> <button class="btn danger" data-action="delete-project" data-id="${p.id}">Eliminar</button>`:""}</td></tr>`;
     }).join("") : `<tr><td colspan="7">${empty("No se encontraron proyectos")}</td></tr>`;
   }
 
@@ -464,7 +495,7 @@
     const pending=currencyTotals(rows,"amount",p=>p.status!=="paid"), paid=currencyTotals(rows,"amount",p=>p.status==="paid");
     $("#paymentSummary").innerHTML=`<article class="summary-card"><span>Pendiente</span><strong>${pending}</strong></article><article class="summary-card"><span>Pagado</span><strong>${paid}</strong></article><article class="summary-card"><span>Registros</span><strong>${rows.length}</strong></article>`;
     const statusText = {paid:"Pagado",partial:"Parcial",pending:"Pendiente"};
-    $("#paymentsTable").innerHTML=rows.length?rows.map(p=>`<tr><td>${esc(userName(p.collaborator_id))}</td><td class="row-title"><strong>${esc(p.concept)}</strong><small>${esc(p.payment_method||"")}${p.reference?` · ${esc(p.reference)}`:""}</small></td><td>${esc(projectName(p.project_id)||"Sin proyecto")}</td><td>${formatMoney(p.amount,p.currency)}</td><td><span class="status-chip ${statusClass(p.status)}">${statusText[p.status]||"Pendiente"}</span></td><td>${formatDate(p.due_date)}</td><td>${isAdmin()?`<button class="btn outline" data-action="edit-payment" data-id="${p.id}">Editar</button> <button class="btn danger" data-action="delete-payment" data-id="${p.id}">Eliminar</button>`:""}</td></tr>`).join(""):`<tr><td colspan="7">${empty("No se encontraron pagos")}</td></tr>`;
+    $("#paymentsTable").innerHTML=rows.length?rows.map(p=>`<tr><td>${esc(userName(p.collaborator_id))}</td><td class="row-title"><strong>${esc(p.concept)}</strong><small>${esc(p.payment_method||"")}${p.reference?` · ${esc(p.reference)}`:""}</small></td><td>${esc(projectName(p.project_id)||"Sin proyecto")}</td><td>${formatMoney(p.amount,p.currency)}</td><td><span class="status-chip ${statusClass(p.status)}">${statusText[p.status]||"Pendiente"}</span></td><td>${formatDate(p.due_date)}</td><td>${isAdmin()?`<button class="btn outline" data-action="edit-payment" data-id="${p.id}">Editar</button> ${p.receipt_path?`<button class="btn outline" data-action="view-receipt" data-id="${p.id}">📎 Comprobante</button> `:""}<button class="btn danger" data-action="delete-payment" data-id="${p.id}">Eliminar</button>`:(p.receipt_path?`<button class="btn outline" data-action="view-receipt" data-id="${p.id}">📎 Ver comprobante</button>`:"—")}</td></tr>`).join(""):`<tr><td colspan="7">${empty("No se encontraron pagos")}</td></tr>`;
   }
 
   function renderUsers() {
@@ -501,6 +532,59 @@
     $("#modalForm").onsubmit=event=>handleModalSubmit(event,type,id);
   }
   function closeModal(){ $("#modalBackdrop").classList.add("hidden"); state.modal=null; }
+
+  async function openTasksModal(projectId) {
+    const project = state.projects.find(p=>p.id===projectId);
+    if(!project){toast("No se encontró el proyecto.","error");return;}
+    state.modal={type:"tasks",id:projectId};
+    $("#modalKicker").textContent="Tareas del proyecto";
+    $("#modalTitle").textContent=project.title;
+    $("#modalForm").onsubmit=event=>event.preventDefault();
+    $("#modalForm").innerHTML=`
+      <div class="task-list field-full" id="taskList"><p class="muted">Cargando tareas…</p></div>
+      <div class="task-add-row field-full">
+        <input type="text" id="newTaskTitle" placeholder="Nueva tarea…">
+        <button type="button" id="addTaskBtn" class="btn primary">Agregar</button>
+      </div>
+      <div class="modal-actions"><button type="button" class="btn outline" onclick="document.getElementById('closeModalBtn').click()">Cerrar</button></div>`;
+    $("#modalBackdrop").classList.remove("hidden");
+    $("#addTaskBtn").addEventListener("click",async()=>{
+      const input=$("#newTaskTitle");
+      const title=input.value.trim();
+      if(!title)return;
+      try{ await db.createTask(projectId,title); input.value=""; await renderTaskList(projectId); }
+      catch(e){toast(e.message||"No se pudo agregar la tarea.","error");}
+    });
+    $("#newTaskTitle").addEventListener("keydown",event=>{
+      if(event.key==="Enter"){ event.preventDefault(); $("#addTaskBtn").click(); }
+    });
+    await renderTaskList(projectId);
+  }
+
+  async function renderTaskList(projectId) {
+    const container=$("#taskList");
+    if(!container)return;
+    try {
+      const tasks=await db.loadTasks(projectId);
+      container.innerHTML = tasks.length ? tasks.map(t=>`
+        <div class="task-item ${t.done?"done":""}">
+          <label class="task-check"><input type="checkbox" data-task-id="${t.id}" ${t.done?"checked":""}><span>${esc(t.title)}</span></label>
+          <button type="button" class="icon-button" data-task-delete="${t.id}" aria-label="Eliminar tarea">×</button>
+        </div>`).join("") : `<p class="muted">Todavía no hay tareas para este proyecto.</p>`;
+      $$("input[data-task-id]",container).forEach(input=>input.addEventListener("change",async()=>{
+        try{ await db.toggleTask(input.dataset.taskId,input.checked); await renderTaskList(projectId); }
+        catch(e){toast(e.message||"No se pudo actualizar la tarea.","error");}
+      }));
+      $$("[data-task-delete]",container).forEach(btn=>btn.addEventListener("click",async()=>{
+        if(!confirm("¿Eliminar esta tarea?"))return;
+        try{ await db.deleteTask(btn.dataset.taskDelete); await renderTaskList(projectId); }
+        catch(e){toast(e.message||"No se pudo eliminar la tarea.","error");}
+      }));
+    } catch(e) {
+      container.innerHTML = `<p class="muted">No se pudieron cargar las tareas.</p>`;
+    }
+  }
+
   function getRecord(type,id){
     const map={company:state.companies,project:state.projects,extra:state.extras,payment:state.payments,user:state.users};
     return id?(map[type]||[]).find(x=>x.id===id):null;
@@ -517,7 +601,7 @@
     if(type==="company")return{title:r.id?"Editar empresa":"Agregar empresa",html:`<label>Empresa<input name="name" required value="${esc(r.name||"")}"></label><label>Persona de contacto<input name="contact_name" value="${esc(r.contact_name||"")}"></label><label>Correo<input name="email" type="email" value="${esc(r.email||"")}"></label><label>Teléfono<input name="phone" value="${esc(r.phone||"")}"></label><label class="field-full">Dirección<input name="address" value="${esc(r.address||"")}"></label><label class="field-full">Notas internas<textarea name="notes">${esc(r.notes||"")}</textarea></label>${save}`};
     if(type==="project")return{title:r.id?"Editar proyecto":"Nuevo proyecto",html:`<label>Nombre del proyecto<input name="title" required value="${esc(r.title||"")}"></label><label>Empresa<select name="company_id" required><option value="">Seleccionar</option>${optionList(state.companies,"id","name",r.company_id)}</select></label><label>Tipo de trabajo<input name="work_type" required value="${esc(r.work_type||"")}" placeholder="Web Design & Development"></label><label>Responsable<select name="assigned_to" required>${optionList(state.users.filter(u=>u.active),"id","full_name",r.assigned_to||(!isAdmin()?state.profile.id:""))}</select></label><label>Estado<select name="status">${statusOptions(r.status||"not_started")}</select></label><label>Moneda<select name="currency">${currencyOptions(r.currency||"USD")}</select></label><label>Monto acordado<input name="quoted_amount" type="number" min="0" step="0.01" value="${r.quoted_amount||0}"></label><label>Pagado por el cliente<input name="client_paid" type="number" min="0" step="0.01" value="${r.client_paid||0}"></label><label>Fecha de inicio<input name="start_date" type="date" value="${r.start_date||today()}"></label><label>Fecha límite<input name="due_date" type="date" value="${r.due_date||""}"></label><label class="field-full">Descripción<textarea name="description">${esc(r.description||"")}</textarea></label><label class="field-full">Notas internas<textarea name="notes">${esc(r.notes||"")}</textarea></label>${save}`};
     if(type==="extra")return{title:r.id?"Editar extra":"Agregar extra",html:`<label>Proyecto<select name="project_id" required>${optionList(state.projects,"id","title",r.project_id)}</select></label><label>Responsable<select name="assigned_to" required>${optionList(state.users.filter(u=>u.active),"id","full_name",r.assigned_to)}</select></label><label>Nombre del extra<input name="title" required value="${esc(r.title||"")}"></label><label>Fecha<input name="extra_date" type="date" value="${r.extra_date||today()}"></label><label>Precio cobrado al cliente<input name="client_price" type="number" min="0" step="0.01" required value="${r.client_price||0}"></label><label>Monto para el colaborador<input name="collaborator_amount" type="number" min="0" step="0.01" required value="${r.collaborator_amount||0}"></label><label>Moneda<select name="currency">${currencyOptions(r.currency||"USD")}</select></label><label>Estado de cobro<select name="client_status"><option value="pending" ${r.client_status!=="paid"?"selected":""}>Pendiente</option><option value="paid" ${r.client_status==="paid"?"selected":""}>Pagado</option></select></label><label>Cobrar al cliente<select name="billable_to_client"><option value="true" ${r.billable_to_client!==false?"selected":""}>Sí</option><option value="false" ${r.billable_to_client===false?"selected":""}>No</option></select></label><label class="field-full">Descripción<textarea name="description">${esc(r.description||"")}</textarea></label><label class="field-full">Notas<textarea name="notes">${esc(r.notes||"")}</textarea></label>${save}`};
-    if(type==="payment")return{title:r.id?"Editar pago":"Registrar pago",html:`<label>Colaborador<select name="collaborator_id" required>${optionList(state.users.filter(u=>u.active),"id","full_name",r.collaborator_id)}</select></label><label>Proyecto<select name="project_id"><option value="">Sin proyecto</option>${optionList(state.projects,"id","title",r.project_id)}</select></label><label>Concepto<input name="concept" required value="${esc(r.concept||"")}"></label><label>Monto<input name="amount" type="number" min="0" step="0.01" required value="${r.amount||0}"></label><label>Moneda<select name="currency">${currencyOptions(r.currency||"USD")}</select></label><label>Método de pago<select name="payment_method">${paymentMethodOptions(r.payment_method)}</select></label><label>Estado<select name="status">${paymentStatusOptions(r.status)}</select></label><label>Comprobante o referencia<input name="reference" value="${esc(r.reference||"")}"></label><label>Vencimiento<input name="due_date" type="date" value="${r.due_date||""}"></label><label>Fecha de pago<input name="paid_date" type="date" value="${r.paid_date||""}"></label><label class="field-full">Notas<textarea name="notes">${esc(r.notes||"")}</textarea></label>${save}`};
+    if(type==="payment")return{title:r.id?"Editar pago":"Registrar pago",html:`<label>Colaborador<select name="collaborator_id" required>${optionList(state.users.filter(u=>u.active),"id","full_name",r.collaborator_id)}</select></label><label>Proyecto<select name="project_id"><option value="">Sin proyecto</option>${optionList(state.projects,"id","title",r.project_id)}</select></label><label>Concepto<input name="concept" required value="${esc(r.concept||"")}"></label><label>Monto<input name="amount" type="number" min="0" step="0.01" required value="${r.amount||0}"></label><label>Moneda<select name="currency">${currencyOptions(r.currency||"USD")}</select></label><label>Método de pago<select name="payment_method">${paymentMethodOptions(r.payment_method)}</select></label><label>Estado<select name="status">${paymentStatusOptions(r.status)}</select></label><label>Comprobante o referencia (texto)<input name="reference" value="${esc(r.reference||"")}"></label><label>Vencimiento<input name="due_date" type="date" value="${r.due_date||""}"></label><label>Fecha de pago<input name="paid_date" type="date" value="${r.paid_date||""}"></label><label class="field-full">Adjuntar comprobante (foto, PDF o Excel)<input type="file" name="receipt_file" accept="image/*,.pdf,.xlsx,.xls,.csv"></label>${r.receipt_name?`<p class="field-full muted">Comprobante actual: ${esc(r.receipt_name)} — <button type="button" class="link-button" data-action="view-receipt" data-id="${r.id}">ver</button>. Elige otro archivo arriba para reemplazarlo.</p>`:""}<label class="field-full">Notas<textarea name="notes">${esc(r.notes||"")}</textarea></label>${save}`};
     if(type==="user")return{title:r.id?"Editar usuario":"Crear usuario",html:`<label>Nombre completo<input name="full_name" required value="${esc(r.full_name||"")}"></label><label>Usuario<input name="username" required pattern="[a-z0-9._-]+" value="${esc(r.username||"")}" ${r.id?"readonly":""} placeholder="daniel.perez"></label><label>Email real (acceso y recuperación)<input name="contact_email" type="email" required value="${esc(r.contact_email||"")}" ${r.id?"readonly":""} placeholder="nombre.apellido@solidobusiness.com"></label><label>Cargo<input name="job_title_en" required value="${esc(r.job_title_en||"")}" placeholder="Web Developer & Graphic Designer"></label><label>Permiso<select name="role"><option value="collaborator" ${r.role!=="admin"?"selected":""}>Collaborator — acceso privado</option><option value="admin" ${r.role==="admin"?"selected":""}>Administrator — puede ver y administrar todo</option></select></label>${!r.id?`<label>Contraseña temporal<input name="password" type="password" minlength="8" required autocomplete="new-password"></label>`:""}<label>Estado<select name="active"><option value="true" ${r.active!==false?"selected":""}>Activo</option><option value="false" ${r.active===false?"selected":""}>Inactivo</option></select></label>${save}`};
     return{title:"Registro",html:save};
   }
@@ -526,10 +610,14 @@
     event.preventDefault();
     const button=event.submitter; button.disabled=true; button.textContent="Guardando…";
     try {
-      const form=Object.fromEntries(new FormData(event.target).entries());
+      const formData=new FormData(event.target);
+      const receiptFile = type==="payment" ? formData.get("receipt_file") : null;
+      formData.delete("receipt_file");
+      const form=Object.fromEntries(formData.entries());
       ["quoted_amount","client_paid","amount","client_price","collaborator_amount"].forEach(k=>{if(k in form)form[k]=Number(form[k]||0)});
       if("billable_to_client" in form)form.billable_to_client=form.billable_to_client==="true";
       if("active" in form)form.active=form.active==="true";
+      let savedId=id;
       if(type==="user") {
         form.username = normalizeUsername(form.username);
         if(id) await db.upsert("profiles",{full_name:form.full_name,job_title_en:form.job_title_en,role:form.role,active:form.active},id);
@@ -538,7 +626,11 @@
         const table={company:"companies",project:"projects",extra:"extras",payment:"payments"}[type];
         const payload={...form,created_by:state.profile.id};
         if(type==="project"&&!isAdmin()) payload.assigned_to=state.profile.id;
-        await db.upsert(table,payload,id);
+        savedId = await db.upsert(table,payload,id);
+      }
+      if(type==="payment" && receiptFile && receiptFile.size>0) {
+        const paymentId = id || savedId;
+        if (paymentId) await db.uploadReceipt(paymentId,receiptFile);
       }
       await logActivity(`${id?"Actualizó":"Creó"} ${typeLabel(type)}${form.title?`: ${form.title}`:""}`);
       closeModal(); await refreshData(); renderCurrentView(); toast("Cambios guardados correctamente.");
@@ -550,6 +642,14 @@
   async function handleAction(button) {
     const {action,id}=button.dataset;
     if(action.startsWith("edit-")){openModal(action.replace("edit-",""),id);return;}
+    if(action==="view-tasks"){openTasksModal(id);return;}
+    if(action==="view-receipt"){
+      const payment=state.payments.find(p=>p.id===id);
+      if(!payment?.receipt_path){toast("Este pago no tiene comprobante adjunto.","error");return;}
+      try{const url=await db.getReceiptUrl(payment.receipt_path);window.open(url,"_blank");}
+      catch(e){toast(e.message||"No se pudo abrir el comprobante.","error");}
+      return;
+    }
     if(action==="reset-user-password"){
       const user=state.users.find(u=>u.id===id); if(!user)return;
       const password=prompt(`Nueva contraseña temporal para ${user.full_name}:`);
