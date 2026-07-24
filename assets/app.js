@@ -63,11 +63,16 @@
   const $ = (selector, root = document) => root.querySelector(selector);
   const $$ = (selector, root = document) => [...root.querySelectorAll(selector)];
   const esc = (value = "") => String(value).replace(/[&<>'"]/g, ch => ({"&":"&amp;","<":"&lt;",">":"&gt;","'":"&#39;",'"':"&quot;"}[ch]));
-  const today = () => new Date().toISOString().slice(0,10);
+  // Fecha local en formato YYYY-MM-DD. OJO: no usar new Date().toISOString() para
+  // esto, porque toISOString() convierte a UTC y en Argentina (UTC-3) eso hace que
+  // cualquier hora después de las 21:00 devuelva la fecha de MAÑANA en vez de hoy
+  // (ej: precargar mal la fecha de inicio de un proyecto nuevo creado de noche).
+  const localDateStr = d => `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,"0")}-${String(d.getDate()).padStart(2,"0")}`;
+  const today = () => localDateStr(new Date());
   const initials = name => String(name || "U").split(/\s+/).filter(Boolean).slice(0,2).map(x => x[0]).join("").toUpperCase();
   const formatDate = value => value ? new Intl.DateTimeFormat("es-AR", {day:"2-digit",month:"short",year:"numeric"}).format(new Date(`${value}T12:00:00`)) : "Sin fecha";
   const statusLabel = value => PROJECT_STATUSES.find(([key]) => key === value)?.[1] || value || "Sin estado";
-  const statusClass = value => ({completed:"completed",cancelled:"cancelled",pending_payment:"pending",pending_closure:"waiting",awaiting_client:"waiting",awaiting_approval:"waiting",not_started:"pending",paid:"paid",partial:"partial",pending:"pending",active:"active"}[value] || "");
+  const statusClass = value => ({completed:"completed",cancelled:"cancelled",pending_payment:"pending",pending_closure:"waiting",awaiting_client:"waiting",awaiting_approval:"waiting",not_started:"pending",started:"waiting",in_progress:"waiting",paid:"paid",partial:"partial",pending:"pending",active:"active"}[value] || "");
   // Cotización del dólar blue (mercado real/paralelo en Argentina, el tipo de cambio que
   // se acerca más a lo que de verdad se recibe con remesas como Remitly, muy distinto del
   // dólar oficial). Se actualiza sola cada pocos minutos mientras la app está abierta.
@@ -542,8 +547,17 @@
     const activities = state.activities.slice(0,6);
     $("#activityList").innerHTML = activities.length ? activities.map(a=>`<div class="activity-item"><div class="mini-icon">↗</div><div><strong>${esc(a.action)}</strong><small>${new Date(a.created_at).toLocaleString("es-AR")}</small></div></div>`).join("") : empty("Todavía no hay actividad");
 
+    // "Próximos vencimientos": antes mezclaba fechas ya pasadas (vencidas) junto con
+    // las futuras sin ninguna distinción visual, lo que hacía parecer que el panel
+    // mostraba datos incorrectos cuando en realidad algunos proyectos ya estaban
+    // vencidos. Ahora se marca claramente cada proyecto vencido con una etiqueta roja
+    // "Vencido" para que se note de inmediato cuál necesita atención urgente.
+    const todayStr = today();
     const deadlines = state.projects.filter(p=>p.due_date && !["completed","cancelled"].includes(p.status)).sort((a,b)=>a.due_date.localeCompare(b.due_date)).slice(0,5);
-    $("#deadlinesList").innerHTML = deadlines.length ? deadlines.map(p=>`<div class="mini-item"><div class="mini-icon">◷</div><div><strong>${esc(p.title)}</strong><small>${formatDate(p.due_date)} · ${statusLabel(p.status)}</small></div></div>`).join("") : empty("No hay vencimientos próximos");
+    $("#deadlinesList").innerHTML = deadlines.length ? deadlines.map(p=>{
+      const overdue = p.due_date < todayStr;
+      return `<div class="mini-item"><div class="mini-icon">◷</div><div><strong>${esc(p.title)}</strong><small>${formatDate(p.due_date)} · ${statusLabel(p.status)}</small></div>${overdue?`<span class="status-chip overdue" style="margin-left:auto;flex:0 0 auto">Vencido</span>`:""}</div>`;
+    }).join("") : empty("No hay vencimientos próximos");
 
     renderMyTasks();
   }
@@ -686,7 +700,13 @@
     $("#modalTitle").textContent=project.title;
     $("#modalForm").onsubmit=event=>event.preventDefault();
     const taskSuggestions = ["Paquete Full Diseño Web","Diseño web","Logotipo","Tarjetas de presentación","Manejo de redes sociales","Contenido para redes","Diseño de flyer","Edición de video","Fotografía","Mantenimiento web","Hosting y dominio","SEO básico","Cotización","Entrega final"];
-    const addRow = isViewer() ? "" : `
+    // Igual que la política de la base de datos (tasks_collaborator_all_own): solo el
+    // administrador o el dueño del proyecto pueden asignar tareas nuevas. Un
+    // colaborador que solo tiene una tarea suya dentro de un proyecto ajeno puede ver
+    // la lista, pero no debe ver el formulario de "agregar tarea" porque el guardado
+    // fallaría en el servidor (permiso denegado) y se vería como un error confuso.
+    const canManageProject = isAdmin() || project.assigned_to===state.profile.id;
+    const addRow = (isViewer() || !canManageProject) ? "" : `
       <div class="task-add-row field-full">
         <input type="text" id="newTaskTitle" list="taskSuggestions" placeholder="Nueva tarea… (elige o escribe)">
         <datalist id="taskSuggestions">${taskSuggestions.map(t=>`<option value="${esc(t)}">`).join("")}</datalist>
@@ -704,18 +724,25 @@
       <div class="modal-actions"><button type="button" class="btn outline" onclick="document.getElementById('closeModalBtn').click()">Cerrar</button></div>`;
     $("#modalBackdrop").classList.remove("hidden");
     if (!isViewer()) {
-      $("#addTaskBtn").addEventListener("click",async()=>{
+      $("#addTaskBtn").addEventListener("click",async(event)=>{
+        // Guard contra doble clic/doble toque (mismo problema que ya se corrigió en
+        // los botones de iniciar/completar tarea): sin esto, tocar dos veces rápido
+        // "Agregar" crea la misma tarea duplicada dos veces.
+        const btn=event.currentTarget;
+        if(btn.disabled)return;
         const input=$("#newTaskTitle");
         const title=input.value.trim();
         const assignedTo=$("#newTaskAssignee").value;
         const instructions=$("#newTaskInstructions").value.trim();
         if(!title)return;
+        btn.disabled=true;
         try{
           await db.createTask(projectId,title,assignedTo,instructions);
           notify(assignedTo, `Se te asignó la tarea "${title}" en el proyecto "${project.title}".${instructions?" Tiene instrucciones, revísalas en la tarea.":""}`);
           input.value=""; $("#newTaskInstructions").value=""; await renderTaskList(projectId);
         }
         catch(e){toast(e.message||"No se pudo agregar la tarea.","error");}
+        finally{btn.disabled=false;}
       });
       $("#newTaskTitle").addEventListener("keydown",event=>{
         if(event.key==="Enter"){ event.preventDefault(); $("#addTaskBtn").click(); }
@@ -728,21 +755,32 @@
     const container=$("#taskList");
     if(!container)return;
     const project = state.projects.find(p=>p.id===projectId);
+    // Debe reflejar exactamente el permiso real de la base de datos
+    // (tasks_collaborator_all_own): admin, dueño del proyecto, o dueño de la tarea.
+    const canManageProject = isAdmin() || (project && project.assigned_to===state.profile.id);
+    const canEditTask = t => canManageProject || t.assigned_to===state.profile.id;
     try {
       const tasks=await db.loadTasks(projectId);
-      container.innerHTML = tasks.length ? tasks.map(t=>`
+      container.innerHTML = tasks.length ? tasks.map(t=>{
+        const editable = !isViewer() && canEditTask(t);
+        return `
         <div class="task-item ${t.done?"done":""}">
-          <label class="task-check"><input type="checkbox" data-task-id="${t.id}" data-task-title="${esc(t.title)}" ${t.done?"checked":""} ${isViewer()?"disabled":""}><span>${esc(t.title)}<small class="task-assignee">👤 ${esc(userName(t.assigned_to))} · <span class="status-chip ${taskStatusChip(t.status)}">${taskStatusLabel(t.status)}</span></small>${t.instructions?`<small class="task-assignee">📋 ${esc(t.instructions)}</small>`:""}</span></label>
-          ${isViewer()?"":`<button type="button" class="icon-button" data-task-delete="${t.id}" aria-label="Eliminar tarea">×</button>`}
-        </div>`).join("") : `<p class="muted">Todavía no hay tareas para este proyecto.</p>`;
+          <label class="task-check"><input type="checkbox" data-task-id="${t.id}" data-task-title="${esc(t.title)}" ${t.done?"checked":""} ${editable?"":"disabled"}><span>${esc(t.title)}<small class="task-assignee">👤 ${esc(userName(t.assigned_to))} · <span class="status-chip ${taskStatusChip(t.status)}">${taskStatusLabel(t.status)}</span></small>${t.instructions?`<small class="task-assignee">📋 ${esc(t.instructions)}</small>`:""}</span></label>
+          ${editable?`<button type="button" class="icon-button" data-task-delete="${t.id}" aria-label="Eliminar tarea">×</button>`:""}
+        </div>`;
+      }).join("") : `<p class="muted">Todavía no hay tareas para este proyecto.</p>`;
       if (!isViewer()) {
-        $$("input[data-task-id]",container).forEach(input=>input.addEventListener("change",async()=>{
+        $$("input[data-task-id]",container).forEach(input=>input.addEventListener("change",async(event)=>{
+          // Mismo guard: deshabilitar el checkbox mientras se guarda evita que un
+          // segundo toque rápido dispare otro toggle antes de que termine el primero.
+          const box=event.currentTarget;
+          box.disabled=true;
           try{
-            await db.toggleTask(input.dataset.taskId,input.checked);
-            if(input.checked && project) notify(project.assigned_to, `Se completó la tarea "${input.dataset.taskTitle}" en el proyecto "${project.title}".`);
+            await db.toggleTask(box.dataset.taskId,box.checked);
+            if(box.checked && project) notify(project.assigned_to, `Se completó la tarea "${box.dataset.taskTitle}" en el proyecto "${project.title}".`);
             await renderTaskList(projectId);
           }
-          catch(e){toast(e.message||"No se pudo actualizar la tarea.","error");}
+          catch(e){box.disabled=false;toast(e.message||"No se pudo actualizar la tarea.","error");}
         }));
         $$("[data-task-delete]",container).forEach(btn=>btn.addEventListener("click",async()=>{
           if(!confirm("¿Eliminar esta tarea?"))return;
@@ -888,7 +926,10 @@
     event.preventDefault();
     const p=$("#newPassword").value,c=$("#confirmPassword").value;
     if(p!==c){toast("Las contraseñas no coinciden.","error");return;}
-    try{await db.changePassword(p);event.target.reset();toast("Contraseña actualizada de forma segura.");}catch(e){toast(e.message,"error");}
+    const button=event.submitter; if(button){button.disabled=true;button.textContent="Guardando…";}
+    try{await db.changePassword(p);event.target.reset();toast("Contraseña actualizada de forma segura.");}
+    catch(e){toast(e.message,"error");}
+    finally{if(button){button.disabled=false;button.textContent="Actualizar contraseña";}}
   }
 
   function exportBackup() {
