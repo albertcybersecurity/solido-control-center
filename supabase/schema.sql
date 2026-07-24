@@ -304,3 +304,96 @@ language sql stable security definer set search_path = public as $$
 $$;
 revoke all on function public.directory_names() from public;
 grant execute on function public.directory_names() to authenticated;
+
+-- ============================================================================
+-- AGREGADO: rol "viewer" (usuario de prueba) — puede ENTRAR y VER absolutamente
+-- todo (empresas, proyectos, tareas, extras, pagos) igual que un administrador,
+-- pero jamás recibe los montos de dinero reales (ni en projects.quoted_amount/
+-- client_paid/collaborator_budget, ni en project_extras.client_price/
+-- collaborator_amount, ni en payments.amount). Es de SOLO LECTURA: no puede
+-- crear, editar ni borrar nada.
+--
+-- El enmascarado es a nivel de BASE DE DATOS, no solo de interfaz: las tres
+-- funciones de abajo (projects_for_viewer, extras_for_viewer, payments_for_viewer)
+-- ni siquiera incluyen las columnas de dinero en su "returns table(...)", así que
+-- esos valores nunca viajan por la red hacia una cuenta viewer, sin importar lo
+-- que se inspeccione desde las herramientas de desarrollador del navegador.
+-- ============================================================================
+
+alter table public.profiles drop constraint if exists profiles_role_check;
+alter table public.profiles add constraint profiles_role_check check (role in ('admin','collaborator','viewer'));
+
+create or replace function private.is_viewer() returns boolean
+language sql stable security definer set search_path = public as $$
+  select exists(select 1 from public.profiles where id=(select auth.uid()) and role='viewer' and active=true);
+$$;
+revoke all on function private.is_viewer() from public;
+grant execute on function private.is_viewer() to authenticated;
+
+-- Empresas y tareas no tienen columnas de dinero: el viewer puede verlas
+-- directamente (RLS a nivel de fila), solo de lectura (no se agrega "for all").
+drop policy if exists "companies_viewer_select_all" on public.companies;
+create policy "companies_viewer_select_all" on public.companies for select to authenticated using ((select private.is_viewer()));
+
+drop policy if exists "tasks_viewer_select_all" on public.tasks;
+create policy "tasks_viewer_select_all" on public.tasks for select to authenticated using ((select private.is_viewer()));
+
+-- projects / project_extras / payments SÍ tienen columnas de dinero: el viewer
+-- NO recibe una policy de select directa sobre esas tablas (así que una consulta
+-- directa a esas tablas le devuelve 0 filas). En su lugar, entra solo por estas
+-- tres funciones, que devuelven todas las filas pero sin las columnas de dinero.
+
+create or replace function public.projects_for_viewer()
+returns table(
+  id uuid, company_id uuid, title text, work_type text, description text,
+  status text, start_date date, due_date date, currency text,
+  assigned_to uuid, notes text, created_by uuid,
+  created_at timestamptz, updated_at timestamptz
+)
+language sql stable security definer set search_path = public as $$
+  select id, company_id, title, work_type, description,
+    status, start_date, due_date, currency,
+    assigned_to, notes, created_by,
+    created_at, updated_at
+  from public.projects
+  where (select private.is_viewer());
+$$;
+revoke all on function public.projects_for_viewer() from public;
+grant execute on function public.projects_for_viewer() to authenticated;
+
+create or replace function public.extras_for_viewer()
+returns table(
+  id uuid, project_id uuid, title text, description text, extra_date date,
+  currency text, billable_to_client boolean, client_status text, notes text,
+  assigned_to uuid, created_by uuid, created_at timestamptz, updated_at timestamptz
+)
+language sql stable security definer set search_path = public as $$
+  select id, project_id, title, description, extra_date,
+    currency, billable_to_client, client_status, notes,
+    assigned_to, created_by, created_at, updated_at
+  from public.project_extras
+  where (select private.is_viewer());
+$$;
+revoke all on function public.extras_for_viewer() from public;
+grant execute on function public.extras_for_viewer() to authenticated;
+
+-- Nota: receipt_path/receipt_name (el comprobante adjunto) se omiten a propósito:
+-- suelen ser una foto/PDF de un pago real y podrían mostrar montos, así que ni
+-- siquiera se listan aquí (además, storage.objects tampoco lo dejaría abrir).
+create or replace function public.payments_for_viewer()
+returns table(
+  id uuid, collaborator_id uuid, project_id uuid, concept text,
+  currency text, payment_method text, reference text, status text,
+  due_date date, paid_date date, notes text, created_by uuid,
+  created_at timestamptz, updated_at timestamptz
+)
+language sql stable security definer set search_path = public as $$
+  select id, collaborator_id, project_id, concept,
+    currency, payment_method, reference, status,
+    due_date, paid_date, notes, created_by,
+    created_at, updated_at
+  from public.payments
+  where (select private.is_viewer());
+$$;
+revoke all on function public.payments_for_viewer() from public;
+grant execute on function public.payments_for_viewer() to authenticated;
