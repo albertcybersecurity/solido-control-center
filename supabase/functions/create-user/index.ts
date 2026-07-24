@@ -28,7 +28,7 @@ Deno.serve(async (req) => {
     const username = normalizeUsername(body.username || "");
     const email = normalizeEmail(body.email || body.contact_email || "");
     const { password, full_name, job_title_en, active = true } = body;
-    const role = body.role === "admin" ? "admin" : "collaborator";
+    const role = ["admin", "viewer"].includes(body.role) ? body.role : "collaborator";
     if (!username || !email || !password || !full_name || !job_title_en) throw new Error("Faltan datos obligatorios (usuario, email real, contraseña, nombre y cargo).");
     if (!isValidEmail(email)) throw new Error("El email no es válido.");
     if (password.length < 8) throw new Error("La contraseña debe tener al menos 8 caracteres.");
