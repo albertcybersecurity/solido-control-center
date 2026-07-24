@@ -202,7 +202,7 @@
       // (se resuelven con el join automático de PostgREST vía las foreign keys).
       const {data:myTasksData,error:myTasksError} = await supabaseClient
         .from("tasks")
-        .select("*, projects(title, companies(name))")
+        .select("*, projects(title, assigned_to, companies(name))")
         .eq("assigned_to", state.profile.id)
         .order("created_at",{ascending:true});
       if (myTasksError) throw myTasksError;
@@ -264,6 +264,27 @@
     async deleteTask(id){
       const {error} = await supabaseClient.from("tasks").delete().eq("id",id);
       if (error) throw error;
+    },
+    // Bitácora de avance: quien tiene la tarea va anotando qué llevó hecho mientras
+    // trabaja, y eso queda visible (con su nombre y fecha) para quien la asignó.
+    async loadTaskNotes(taskId){
+      const {data,error} = await supabaseClient
+        .from("task_notes")
+        .select("*, profiles:author_id(full_name)")
+        .eq("task_id",taskId)
+        .order("created_at",{ascending:true});
+      if (error) throw error;
+      return data || [];
+    },
+    async addTaskNote(taskId,note){
+      const {error} = await supabaseClient.from("task_notes").insert({task_id:taskId,author_id:state.profile.id,note});
+      if (error) throw error;
+    },
+    // Campana de notificaciones: marca como "vistas" todas las notificaciones propias
+    // que todavía no se habían leído (se usa cuando el usuario abre la campana).
+    async markNotificationsRead(){
+      const {error} = await supabaseClient.from("activities").update({read_at:new Date().toISOString()}).eq("actor_id",state.profile.id).is("read_at",null);
+      if (error) throw error;
     }
   };
 
@@ -282,6 +303,115 @@
   function notify(userId, message) {
     if (!userId || userId === state.profile.id) return;
     logActivity(message, userId);
+  }
+
+  // ==========================================================================
+  // Campana de notificaciones. Muestra los avisos dirigidos a la persona que
+  // inició sesión (asignación de tareas, pagos registrados, etc — los mismos
+  // que ya se guardaban con notify()), con contador de "no leídas", sonido y
+  // aviso del sistema operativo cuando llega uno nuevo.
+  //
+  // OJO con el alcance: esto avisa mientras el navegador/pestaña siga abierto
+  // (aunque esté en segundo plano) usando Supabase Realtime + la Notification
+  // API del navegador. Si el navegador está completamente cerrado no llega
+  // nada — eso requeriría además un service worker con Push API y un backend
+  // que dispare el envío (infraestructura aparte, no incluida acá).
+  // ==========================================================================
+  let notifChannel = null;
+  let notifAudioCtx = null;
+
+  function playNotifSound() {
+    try {
+      notifAudioCtx = notifAudioCtx || new (window.AudioContext || window.webkitAudioContext)();
+      const ctx = notifAudioCtx;
+      const now = ctx.currentTime;
+      [880, 1320].forEach((freq, i) => {
+        const osc = ctx.createOscillator();
+        const gain = ctx.createGain();
+        osc.type = "sine"; osc.frequency.value = freq;
+        gain.gain.setValueAtTime(0.0001, now + i*0.14);
+        gain.gain.exponentialRampToValueAtTime(0.18, now + i*0.14 + 0.02);
+        gain.gain.exponentialRampToValueAtTime(0.0001, now + i*0.14 + 0.22);
+        osc.connect(gain); gain.connect(ctx.destination);
+        osc.start(now + i*0.14); osc.stop(now + i*0.14 + 0.24);
+      });
+    } catch(e) { /* audio no disponible en este navegador, no es crítico */ }
+  }
+
+  function unreadNotifications() {
+    return (state.activities||[]).filter(a => a.actor_id===state.profile.id && !a.read_at);
+  }
+
+  function renderNotifBadge() {
+    const badge = $("#notifBadge");
+    if (!badge) return;
+    const count = unreadNotifications().length;
+    badge.textContent = count > 9 ? "9+" : count;
+    badge.classList.toggle("hidden", count===0);
+  }
+
+  function renderNotifDropdownList() {
+    const list = $("#notifList");
+    if (!list) return;
+    const own = (state.activities||[]).filter(a => a.actor_id===state.profile.id).slice(0,20);
+    list.innerHTML = own.length ? own.map(a => `
+      <div class="notif-item ${a.read_at?"":"unread"}">
+        <p>${esc(a.action)}</p>
+        <small>${new Date(a.created_at).toLocaleString("es-AR")}</small>
+      </div>`).join("") : `<p class="muted">No tenés notificaciones todavía.</p>`;
+    const enableBtn = $("#notifEnableBtn");
+    if (enableBtn) enableBtn.classList.toggle("hidden", !("Notification" in window) || Notification.permission !== "default");
+  }
+
+  async function toggleNotifDropdown() {
+    const dropdown = $("#notifDropdown");
+    if (!dropdown) return;
+    const opening = dropdown.classList.contains("hidden");
+    dropdown.classList.toggle("hidden", !opening);
+    if (!opening) return;
+    renderNotifDropdownList();
+    if (unreadNotifications().length) {
+      try {
+        await db.markNotificationsRead();
+        const now = new Date().toISOString();
+        state.activities.forEach(a => { if (a.actor_id===state.profile.id && !a.read_at) a.read_at = now; });
+        renderNotifBadge();
+        renderNotifDropdownList();
+      } catch(e) { /* si falla, no pasa nada grave: se reintenta la próxima vez que abra la campana */ }
+    }
+  }
+
+  function requestNotifPermission() {
+    if (!("Notification" in window)) { toast("Este navegador no admite notificaciones del sistema.","error"); return; }
+    Notification.requestPermission().then(() => renderNotifDropdownList());
+  }
+
+  // Se dispara cuando llega una fila nueva a "activities" dirigida a esta persona
+  // (Supabase Realtime). Actualiza el estado local, hace sonar la campana y, si
+  // el permiso está concedido, muestra un aviso del sistema operativo.
+  function handleIncomingNotification(row) {
+    if (!row || row.actor_id !== state.profile.id) return;
+    if ((state.activities||[]).some(a => a.id===row.id)) return; // ya lo teníamos (evita duplicar por reconexión)
+    state.activities = [row, ...(state.activities||[])];
+    renderNotifBadge();
+    if (!$("#notifDropdown")?.classList.contains("hidden")) renderNotifDropdownList();
+    playNotifSound();
+    if ("Notification" in window && Notification.permission === "granted") {
+      try { new Notification("Sólido Control", {body: row.action, icon: "assets/solido-logo.jpeg"}); } catch(e) { /* algunos navegadores requieren un service worker; se ignora si falla */ }
+    }
+  }
+
+  function initNotifications() {
+    renderNotifBadge();
+    if (!supabaseClient || notifChannel) return;
+    notifChannel = supabaseClient
+      .channel(`activities-for-${state.profile.id}`)
+      .on("postgres_changes", {event:"INSERT", schema:"public", table:"activities", filter:`actor_id=eq.${state.profile.id}`}, payload => handleIncomingNotification(payload.new))
+      .subscribe();
+  }
+
+  function teardownNotifications() {
+    if (notifChannel) { supabaseClient?.removeChannel(notifChannel); notifChannel = null; }
   }
 
   async function initialize() {
@@ -329,7 +459,11 @@
       const go = event.target.closest("[data-go-view]"); if (go) showView(go.dataset.goView);
       const open = event.target.closest("[data-open-modal]"); if (open) openModal(open.dataset.openModal);
       const action = event.target.closest("[data-action]"); if (action) handleAction(action);
+      // Cerrar la campana de notificaciones si se toca afuera de ella.
+      if (!event.target.closest(".notif-wrap")) $("#notifDropdown")?.classList.add("hidden");
     });
+    $("#notifBellBtn").addEventListener("click",event => { event.stopPropagation(); toggleNotifDropdown(); });
+    $("#notifEnableBtn").addEventListener("click",requestNotifPermission);
     $("#quickAddBtn").addEventListener("click",() => openModal("project"));
     $("#closeModalBtn").addEventListener("click",closeModal);
     $("#modalBackdrop").addEventListener("click",event => { if (event.target.id === "modalBackdrop") closeModal(); });
@@ -384,6 +518,7 @@
   }
 
   async function handleLogout() {
+    teardownNotifications();
     await db.logout();
     state.user = state.profile = null;
     showAuth("login");
@@ -398,6 +533,7 @@
     updateUserUI();
     showView("dashboard");
     refreshFxRate().then(() => renderCurrentView());
+    initNotifications();
   }
 
   function showAuth(mode) {
@@ -449,7 +585,7 @@
     $$(".view").forEach(el => el.classList.toggle("active",el.id === `view-${view}`));
     $$(".nav-item").forEach(el => el.classList.toggle("active",el.dataset.view === view));
     const titles = {
-      dashboard:["Dashboard","Resumen general"],companies:["Empresas","Base de clientes"],projects:["Proyectos","Control de trabajo"],extras:["Extras","Adicionales por proyecto"],payments:[isAdmin()?"Pagos":(isViewer()?"Pagos":"Mis pagos"),isViewer()?"Solo lectura, sin montos":"Control financiero privado"],users:["Usuarios y permisos","Administradores y colaboradores"],account:["Mi cuenta","Perfil y seguridad"]
+      dashboard:["Dashboard","Resumen general"],tasks:["Tareas pendientes","Tu trabajo asignado"],companies:["Empresas","Base de clientes"],projects:["Proyectos","Control de trabajo"],extras:["Extras","Adicionales por proyecto"],payments:[isAdmin()?"Pagos":(isViewer()?"Pagos":"Mis pagos"),isViewer()?"Solo lectura, sin montos":"Control financiero privado"],users:["Usuarios y permisos","Administradores y colaboradores"],account:["Mi cuenta","Perfil y seguridad"]
     };
     $("#viewTitle").textContent = titles[view][0]; $("#viewKicker").textContent = titles[view][1];
     $("#sidebar").classList.remove("open");
@@ -457,7 +593,7 @@
   }
 
   function renderCurrentView() {
-    ({dashboard:renderDashboard,companies:renderCompanies,projects:renderProjects,extras:renderExtras,payments:renderPayments,users:renderUsers,account:updateUserUI}[state.currentView] || (()=>{}))();
+    ({dashboard:renderDashboard,tasks:renderTasksView,companies:renderCompanies,projects:renderProjects,extras:renderExtras,payments:renderPayments,users:renderUsers,account:updateUserUI}[state.currentView] || (()=>{}))();
   }
 
   function currencyTotals(items, amountKey, filter = () => true) {
@@ -560,12 +696,15 @@
     }).join("") : empty("No hay vencimientos próximos");
 
     renderMyTasks();
+    updateTasksNavBadge();
   }
 
   // Panel "Tareas pendientes" del Dashboard: muestra las tareas asignadas a la
   // persona que inició sesión (de cualquier proyecto/empresa), con un botón para
   // avanzar el estado: Pendiente → (Iniciar tarea) → En progreso → (Tarea
   // terminada) → Completada. Cada paso queda registrado en "Actividad reciente".
+  // Tocar el texto de la tarea (no el botón) abre el detalle completo, con las
+  // instrucciones y la bitácora de avance.
   function renderMyTasks() {
     const list = $("#myTasksList");
     if (!list) return;
@@ -573,18 +712,119 @@
       const order = {in_progress:0,pending:1};
       return (order[a.status]??1)-(order[b.status]??1) || (a.created_at||"").localeCompare(b.created_at||"");
     });
-    list.innerHTML = rows.length ? rows.map(t=>{
-      const projectTitle = t.projects?.title || "Sin proyecto";
-      const companyName = t.projects?.companies?.name || "Sin empresa";
-      const actionBtn = isViewer() ? "" : t.status==="pending"
-        ? `<button class="btn outline" data-action="start-task" data-id="${t.id}">Iniciar tarea</button>`
-        : `<button class="btn primary" data-action="complete-task" data-id="${t.id}">Tarea terminada</button>`;
-      return `<div class="task-item">
-        <span class="task-check" style="cursor:default"><span>${esc(t.title)}<small class="task-assignee">🏢 ${esc(companyName)} · ${esc(projectTitle)}</small>${t.instructions?`<small class="task-assignee">📋 ${esc(t.instructions)}</small>`:""}</span></span>
-        <span class="status-chip ${taskStatusChip(t.status)}">${taskStatusLabel(t.status)}</span>
-        ${actionBtn}
-      </div>`;
-    }).join("") : empty("No tienes tareas pendientes");
+    list.innerHTML = rows.length ? rows.map(t=>taskRowHtml(t)).join("") : empty("No tienes tareas pendientes");
+  }
+
+  // Vista completa "Tareas pendientes" en el menú principal: TODAS las tareas
+  // asignadas a la persona (incluye las ya completadas, al final y atenuadas),
+  // para poder revisar el historial completo, no solo lo pendiente.
+  function renderTasksView() {
+    const list = $("#tasksFullList");
+    if (!list) return;
+    const rows = [...(state.myTasks||[])].sort((a,b)=>{
+      const order = {in_progress:0,pending:1,completed:2};
+      return (order[a.status]??1)-(order[b.status]??1) || (a.created_at||"").localeCompare(b.created_at||"");
+    });
+    list.innerHTML = rows.length ? rows.map(t=>taskRowHtml(t)).join("") : empty("No tenés tareas asignadas todavía.");
+    updateTasksNavBadge();
+  }
+
+  function taskRowHtml(t) {
+    const projectTitle = t.projects?.title || "Sin proyecto";
+    const companyName = t.projects?.companies?.name || "Sin empresa";
+    const actionBtn = (isViewer() || t.status==="completed") ? "" : t.status==="pending"
+      ? `<button class="btn outline" data-action="start-task" data-id="${t.id}">Iniciar tarea</button>`
+      : `<button class="btn primary" data-action="complete-task" data-id="${t.id}">Tarea terminada</button>`;
+    return `<div class="task-item ${t.status==="completed"?"done":""}">
+      <span class="task-check" style="cursor:pointer" data-action="open-task" data-id="${t.id}"><span>${esc(t.title)}<small class="task-assignee">🏢 ${esc(companyName)} · ${esc(projectTitle)}</small>${t.instructions?`<small class="task-assignee">📋 ${esc(t.instructions)}</small>`:""}</span></span>
+      <span class="status-chip ${taskStatusChip(t.status)}">${taskStatusLabel(t.status)}</span>
+      ${actionBtn}
+    </div>`;
+  }
+
+  // Contador en el ícono del menú lateral: cuántas tareas están pendientes o en
+  // progreso ahora mismo, para que se note de un vistazo sin tener que entrar.
+  function updateTasksNavBadge() {
+    const badge = $("#tasksNavBadge");
+    if (!badge) return;
+    const count = (state.myTasks||[]).filter(t=>t.status!=="completed").length;
+    badge.textContent = count;
+    badge.classList.toggle("hidden",count===0);
+  }
+
+  // Detalle de una tarea: instrucciones de quien la asignó, bitácora de avance
+  // (donde quien la ejecuta va anotando qué llevó hecho mientras trabaja), y el
+  // botón para pasar de pendiente → en progreso → completada.
+  async function openTaskDetail(taskId) {
+    const task = (state.myTasks||[]).find(t=>t.id===taskId);
+    if (!task) { toast("No se encontró la tarea.","error"); return; }
+    state.modal = {type:"task-detail", id:taskId};
+    const projectTitle = task.projects?.title || "Sin proyecto";
+    const companyName = task.projects?.companies?.name || "Sin empresa";
+    $("#modalKicker").textContent = "Tarea";
+    $("#modalTitle").textContent = task.title;
+    $("#modalForm").onsubmit = event => event.preventDefault();
+    $("#modalForm").innerHTML = `
+      <div class="field-full">
+        <p class="muted">🏢 ${esc(companyName)} · ${esc(projectTitle)}</p>
+        <span class="status-chip ${taskStatusChip(task.status)}">${taskStatusLabel(task.status)}</span>
+      </div>
+      ${task.instructions ? `<div class="field-full"><label>Instrucciones de quien asignó la tarea</label><p class="task-instructions-block">${esc(task.instructions)}</p></div>` : ""}
+      <div class="field-full">
+        <label>Avance de la tarea</label>
+        <div id="taskNotesList" class="task-notes-list"><p class="muted">Cargando…</p></div>
+        ${(!isViewer() && task.status!=="completed") ? `
+        <div class="task-note-add">
+          <textarea id="newTaskNoteText" placeholder="Anotá qué llevás hecho…"></textarea>
+          <button type="button" id="addTaskNoteBtn" class="btn outline">Agregar avance</button>
+        </div>` : ""}
+      </div>
+      <div class="modal-actions" id="taskDetailActions"></div>`;
+    $("#modalBackdrop").classList.remove("hidden");
+    renderTaskDetailActions(task);
+    await loadAndRenderTaskNotes(taskId);
+    const addBtn = $("#addTaskNoteBtn");
+    if (addBtn) {
+      addBtn.addEventListener("click", async (event) => {
+        const btn = event.currentTarget;
+        if (btn.disabled) return;
+        const textarea = $("#newTaskNoteText");
+        const note = textarea.value.trim();
+        if (!note) return;
+        btn.disabled = true;
+        try {
+          await db.addTaskNote(taskId, note);
+          textarea.value = "";
+          await loadAndRenderTaskNotes(taskId);
+        } catch(e) { toast(e.message||"No se pudo guardar el avance.","error"); }
+        finally { btn.disabled = false; }
+      });
+    }
+  }
+
+  function renderTaskDetailActions(task) {
+    const el = $("#taskDetailActions");
+    if (!el) return;
+    if (isViewer() || task.status === "completed") { el.innerHTML = ""; return; }
+    const label = task.status === "pending" ? "Iniciar tarea" : "Marcar como completada";
+    const action = task.status === "pending" ? "start-task" : "complete-task";
+    el.innerHTML = `<button type="button" class="btn primary" data-action="${action}" data-id="${task.id}">${label}</button>`;
+  }
+
+  async function loadAndRenderTaskNotes(taskId) {
+    const list = $("#taskNotesList");
+    if (!list) return;
+    try {
+      const notes = await db.loadTaskNotes(taskId);
+      list.innerHTML = notes.length ? notes.map(n => `
+        <div class="task-note-item">
+          <strong>${esc(n.profiles?.full_name || "Alguien")}</strong>
+          <small>${new Date(n.created_at).toLocaleString("es-AR")}</small>
+          <p>${esc(n.note)}</p>
+        </div>`).join("") : `<p class="muted">Todavía no hay avances anotados.</p>`;
+    } catch(e) {
+      list.innerHTML = `<p class="muted">No se pudo cargar el avance.</p>`;
+    }
   }
 
   function renderCompanies() {
@@ -873,6 +1113,7 @@
     const {action,id}=button.dataset;
     if(action.startsWith("edit-")){openModal(action.replace("edit-",""),id);return;}
     if(action==="view-tasks"){openTasksModal(id);return;}
+    if(action==="open-task"){openTaskDetail(id);return;}
     if(action==="start-task"||action==="complete-task"){
       // Guard contra doble clic/doble toque: en celular es fácil tocar dos veces
       // seguidas antes de que el botón cambie de texto, y como el segundo toque cae
@@ -889,8 +1130,16 @@
         const verb = newStatus==="in_progress" ? "inició" : "completó";
         const projectTitle = task.projects?.title || "";
         await logActivity(`${state.profile.full_name} ${verb} la tarea "${task.title}"${projectTitle?` (${projectTitle})`:""}`);
+        // Avisarle a quien es dueño del proyecto (normalmente el admin que asignó la
+        // tarea) que hubo movimiento, para que le llegue como notificación en su
+        // propia campana en vez de tener que estar revisando manualmente.
+        const projectOwner = task.projects?.assigned_to;
+        if (projectOwner) notify(projectOwner, `${state.profile.full_name} ${verb} la tarea "${task.title}"${projectTitle?` (${projectTitle})`:""}.`);
         await refreshData();
         renderCurrentView();
+        // Si la tarea se estaba viendo en el detalle (modal), lo refrescamos para que
+        // muestre el nuevo estado y el botón correcto, en vez de quedar desactualizado.
+        if (state.modal?.type==="task-detail" && state.modal.id===id) await openTaskDetail(id);
         toast(newStatus==="in_progress" ? "Tarea iniciada." : "¡Tarea completada!");
       }catch(e){button.disabled=false;toast(e.message||"No se pudo actualizar la tarea.","error");}
       return;
