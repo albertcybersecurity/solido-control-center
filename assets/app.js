@@ -241,8 +241,8 @@
       if (error) throw error;
       return data || [];
     },
-    async createTask(projectId,title,assignedTo){
-      const {error} = await supabaseClient.from("tasks").insert({project_id:projectId,title,created_by:state.profile.id,assigned_to:assignedTo||state.profile.id});
+    async createTask(projectId,title,assignedTo,instructions){
+      const {error} = await supabaseClient.from("tasks").insert({project_id:projectId,title,created_by:state.profile.id,assigned_to:assignedTo||state.profile.id,instructions:instructions||null});
       if (error) throw error;
     },
     async toggleTask(id,done){
@@ -566,7 +566,7 @@
         ? `<button class="btn outline" data-action="start-task" data-id="${t.id}">Iniciar tarea</button>`
         : `<button class="btn primary" data-action="complete-task" data-id="${t.id}">Tarea terminada</button>`;
       return `<div class="task-item">
-        <span class="task-check" style="cursor:default"><span>${esc(t.title)}<small class="task-assignee">🏢 ${esc(companyName)} · ${esc(projectTitle)}</small></span></span>
+        <span class="task-check" style="cursor:default"><span>${esc(t.title)}<small class="task-assignee">🏢 ${esc(companyName)} · ${esc(projectTitle)}</small>${t.instructions?`<small class="task-assignee">📋 ${esc(t.instructions)}</small>`:""}</span></span>
         <span class="status-chip ${taskStatusChip(t.status)}">${taskStatusLabel(t.status)}</span>
         ${actionBtn}
       </div>`;
@@ -692,6 +692,11 @@
         <datalist id="taskSuggestions">${taskSuggestions.map(t=>`<option value="${esc(t)}">`).join("")}</datalist>
         <select id="newTaskAssignee">${optionList(state.users.filter(u=>u.active&&u.role!=="viewer"),"id","full_name",project.assigned_to)}</select>
         <button type="button" id="addTaskBtn" class="btn primary">Agregar</button>
+      </div>
+      <div class="field-full">
+        <label>Pasos e instrucciones para ejecutar la tarea (opcional)
+          <textarea id="newTaskInstructions" placeholder="Ej: 1) Diseñar en Canva con la paleta de la empresa. 2) Exportar en PNG y JPG. 3) Enviar al cliente por correo para aprobación."></textarea>
+        </label>
       </div>`;
     $("#modalForm").innerHTML=`
       <div class="task-list field-full" id="taskList"><p class="muted">Cargando tareas…</p></div>
@@ -703,11 +708,12 @@
         const input=$("#newTaskTitle");
         const title=input.value.trim();
         const assignedTo=$("#newTaskAssignee").value;
+        const instructions=$("#newTaskInstructions").value.trim();
         if(!title)return;
         try{
-          await db.createTask(projectId,title,assignedTo);
-          notify(assignedTo, `Se te asignó la tarea "${title}" en el proyecto "${project.title}".`);
-          input.value=""; await renderTaskList(projectId);
+          await db.createTask(projectId,title,assignedTo,instructions);
+          notify(assignedTo, `Se te asignó la tarea "${title}" en el proyecto "${project.title}".${instructions?" Tiene instrucciones, revísalas en la tarea.":""}`);
+          input.value=""; $("#newTaskInstructions").value=""; await renderTaskList(projectId);
         }
         catch(e){toast(e.message||"No se pudo agregar la tarea.","error");}
       });
@@ -726,7 +732,7 @@
       const tasks=await db.loadTasks(projectId);
       container.innerHTML = tasks.length ? tasks.map(t=>`
         <div class="task-item ${t.done?"done":""}">
-          <label class="task-check"><input type="checkbox" data-task-id="${t.id}" data-task-title="${esc(t.title)}" ${t.done?"checked":""} ${isViewer()?"disabled":""}><span>${esc(t.title)}<small class="task-assignee">👤 ${esc(userName(t.assigned_to))} · <span class="status-chip ${taskStatusChip(t.status)}">${taskStatusLabel(t.status)}</span></small></span></label>
+          <label class="task-check"><input type="checkbox" data-task-id="${t.id}" data-task-title="${esc(t.title)}" ${t.done?"checked":""} ${isViewer()?"disabled":""}><span>${esc(t.title)}<small class="task-assignee">👤 ${esc(userName(t.assigned_to))} · <span class="status-chip ${taskStatusChip(t.status)}">${taskStatusLabel(t.status)}</span></small>${t.instructions?`<small class="task-assignee">📋 ${esc(t.instructions)}</small>`:""}</span></label>
           ${isViewer()?"":`<button type="button" class="icon-button" data-task-delete="${t.id}" aria-label="Eliminar tarea">×</button>`}
         </div>`).join("") : `<p class="muted">Todavía no hay tareas para este proyecto.</p>`;
       if (!isViewer()) {
