@@ -428,7 +428,8 @@
 
   function currencyTotals(items, amountKey, filter = () => true) {
     const totals = {};
-    items.filter(filter).forEach(item => totals[item.currency || "USD"] = (totals[item.currency || "USD"] || 0) + Number(item[amountKey] || 0));
+    const getValue = typeof amountKey === "function" ? amountKey : item => Number(item[amountKey] || 0);
+    items.filter(filter).forEach(item => totals[item.currency || "USD"] = (totals[item.currency || "USD"] || 0) + Number(getValue(item) || 0));
     return Object.entries(totals).map(([c,v]) => formatMoney(v,c)).join(" · ") || formatMoney(0,"USD");
   }
 
@@ -441,10 +442,11 @@
   }
   // Lo acordado con el cliente (arriba) y lo acordado con el colaborador (aquí) son dos
   // cosas distintas: cuánto se le cobra al cliente por el proyecto vs. cuánto se le paga
-  // al colaborador que lo hace. Esto calcula, para el colaborador, cuánto ya se le pagó
-  // (pagos con estado "Pagado" ligados a este proyecto) y cuánto le faltaría cobrar.
+  // al colaborador que lo hace. Esto calcula, para el colaborador, cuánto ya se le abonó
+  // (sumando "paid_amount" de todos los pagos ligados a este proyecto, no solo los que ya
+  // están 100% "Pagado" — un pago "Parcial" también tiene una parte ya abonada).
   function projectCollaboratorPaid(p) {
-    return state.payments.filter(pay=>pay.project_id===p.id && pay.status==="paid").reduce((sum,pay)=>sum+Number(pay.amount||0),0);
+    return state.payments.filter(pay=>pay.project_id===p.id).reduce((sum,pay)=>sum+Number(pay.paid_amount||0),0);
   }
 
   function renderDashboard() {
@@ -464,8 +466,11 @@
     const clientCollected = Object.entries(clientCollectedByCurrency).map(([c,v])=>formatMoney(v,c)).join(" · ") || formatMoney(0,"USD");
     const clientBalance = Object.entries(clientBalanceByCurrency).map(([c,v])=>formatMoney(v,c)).join(" · ") || formatMoney(0,"USD");
 
-    const collaboratorPaid = currencyTotals(state.payments,"amount",p=>p.status==="paid");
-    const collaboratorPending = currencyTotals(state.payments,"amount",p=>p.status!=="paid");
+    // "Pagado" suma lo realmente abonado (paid_amount) en TODOS los pagos, no solo los que
+    // ya están 100% "Pagado" — un pago "Parcial" también aporta lo que ya se entregó.
+    // "Pendiente" es lo que falta de cada pago (monto total pactado menos lo abonado).
+    const collaboratorPaid = currencyTotals(state.payments,"paid_amount");
+    const collaboratorPending = currencyTotals(state.payments, pay => Math.max(0, Number(pay.amount||0) - Number(pay.paid_amount||0)));
 
     const stats = isAdmin() ? [
       ["◆","Proyectos activos",active,"En curso"],
@@ -569,10 +574,14 @@
       if (dateTo && (!refDate || refDate>dateTo)) return false;
       return true;
     });
-    const pending=isViewer()?"Oculto":currencyTotals(rows,"amount",p=>p.status!=="paid"), paid=isViewer()?"Oculto":currencyTotals(rows,"amount",p=>p.status==="paid");
+    // "Pendiente" = lo que falta de cada pago (monto total pactado menos lo ya abonado).
+    // "Pagado" = suma de lo realmente abonado (paid_amount) en todos los pagos filtrados,
+    // incluyendo la parte ya entregada de los que están "Parcial".
+    const pending=isViewer()?"Oculto":currencyTotals(rows, p => Math.max(0, Number(p.amount||0) - Number(p.paid_amount||0)));
+    const paid=isViewer()?"Oculto":currencyTotals(rows,"paid_amount");
     $("#paymentSummary").innerHTML=`<article class="summary-card"><span>Pendiente</span><strong>${pending}</strong></article><article class="summary-card"><span>Pagado</span><strong>${paid}</strong></article><article class="summary-card"><span>Registros</span><strong>${rows.length}</strong></article>`;
     const statusText = {paid:"Pagado",partial:"Parcial",pending:"Pendiente"};
-    $("#paymentsTable").innerHTML=rows.length?rows.map(p=>`<tr><td>${esc(userName(p.collaborator_id))}</td><td class="row-title"><strong>${esc(p.concept)}</strong><small>${esc(p.payment_method||"")}${p.reference?` · ${esc(p.reference)}`:""}</small></td><td>${esc(projectName(p.project_id)||"Sin proyecto")}</td><td>${isViewer()?'<span class="status-chip">Oculto</span>':formatMoney(p.amount,p.currency)}</td><td><span class="status-chip ${statusClass(p.status)}">${statusText[p.status]||"Pendiente"}</span></td><td>${formatDate(p.due_date)}</td><td>${isAdmin()?`<button class="btn outline" data-action="edit-payment" data-id="${p.id}">Editar</button> ${p.receipt_path?`<button class="btn outline" data-action="view-receipt" data-id="${p.id}">📎 Comprobante</button> `:""}<button class="btn danger" data-action="delete-payment" data-id="${p.id}">Eliminar</button>`:(isViewer()?"—":(p.receipt_path?`<button class="btn outline" data-action="view-receipt" data-id="${p.id}">📎 Ver comprobante</button>`:"—"))}</td></tr>`).join(""):`<tr><td colspan="7">${empty("No se encontraron pagos")}</td></tr>`;
+    $("#paymentsTable").innerHTML=rows.length?rows.map(p=>`<tr><td>${esc(userName(p.collaborator_id))}</td><td class="row-title"><strong>${esc(p.concept)}</strong><small>${esc(p.payment_method||"")}${p.reference?` · ${esc(p.reference)}`:""}</small></td><td>${esc(projectName(p.project_id)||"Sin proyecto")}</td><td>${isViewer()?'<span class="status-chip">Oculto</span>':formatMoney(p.amount,p.currency)}</td><td>${isViewer()?'<span class="status-chip">Oculto</span>':formatMoney(p.paid_amount,p.currency)}</td><td><span class="status-chip ${statusClass(p.status)}">${statusText[p.status]||"Pendiente"}</span></td><td>${formatDate(p.due_date)}</td><td>${isAdmin()?`<button class="btn outline" data-action="edit-payment" data-id="${p.id}">Editar</button> ${p.receipt_path?`<button class="btn outline" data-action="view-receipt" data-id="${p.id}">📎 Comprobante</button> `:""}<button class="btn danger" data-action="delete-payment" data-id="${p.id}">Eliminar</button>`:(isViewer()?"—":(p.receipt_path?`<button class="btn outline" data-action="view-receipt" data-id="${p.id}">📎 Ver comprobante</button>`:"—"))}</td></tr>`).join(""):`<tr><td colspan="8">${empty("No se encontraron pagos")}</td></tr>`;
   }
 
   function renderUsers() {
@@ -697,7 +706,7 @@
     if(type==="company")return{title:r.id?"Editar empresa":"Agregar empresa",html:`<label>Empresa<input name="name" required value="${esc(r.name||"")}"></label><label>Persona de contacto<input name="contact_name" value="${esc(r.contact_name||"")}"></label><label>Correo<input name="email" type="email" value="${esc(r.email||"")}"></label><label>Teléfono<input name="phone" value="${esc(r.phone||"")}"></label><label class="field-full">Dirección<input name="address" value="${esc(r.address||"")}"></label><label class="field-full">Notas internas<textarea name="notes">${esc(r.notes||"")}</textarea></label>${save}`};
     if(type==="project")return{title:r.id?"Editar proyecto":"Nuevo proyecto",html:`<label>Nombre del proyecto<input name="title" required value="${esc(r.title||"")}"></label><label>Empresa<select name="company_id" required><option value="">Seleccionar</option>${optionList(state.companies,"id","name",r.company_id)}</select></label><label>Tipo de trabajo<input name="work_type" required value="${esc(r.work_type||"")}" placeholder="Web Design & Development"></label><label>Responsable<select name="assigned_to" required>${optionList(state.users.filter(u=>u.active&&u.role!=="viewer"),"id","full_name",r.assigned_to||(!isAdmin()?state.profile.id:""))}</select></label><label>Estado<select name="status">${statusOptions(r.status||"not_started")}</select></label><label>Moneda<select name="currency">${currencyOptions(r.currency||"USD")}</select></label><label>Monto acordado con el cliente<input name="quoted_amount" type="number" min="0" step="0.01" value="${r.quoted_amount||0}"></label><label>Cobrado al cliente<input name="client_paid" type="number" min="0" step="0.01" value="${r.client_paid||0}"></label><label>Monto acordado con el colaborador<input name="collaborator_budget" type="number" min="0" step="0.01" value="${r.collaborator_budget||0}"></label><label>Fecha de inicio<input name="start_date" type="date" value="${r.start_date||today()}"></label><label>Fecha límite<input name="due_date" type="date" value="${r.due_date||""}"></label><label class="field-full">Descripción<textarea name="description">${esc(r.description||"")}</textarea></label><label class="field-full">Notas internas<textarea name="notes">${esc(r.notes||"")}</textarea></label>${save}`};
     if(type==="extra")return{title:r.id?"Editar extra":"Agregar extra",html:`<label>Proyecto<select name="project_id" required>${optionList(state.projects,"id","title",r.project_id)}</select></label><label>Responsable<select name="assigned_to" required>${optionList(state.users.filter(u=>u.active&&u.role!=="viewer"),"id","full_name",r.assigned_to)}</select></label><label>Nombre del extra<input name="title" required value="${esc(r.title||"")}"></label><label>Fecha<input name="extra_date" type="date" value="${r.extra_date||today()}"></label><label>Precio cobrado al cliente<input name="client_price" type="number" min="0" step="0.01" required value="${r.client_price||0}"></label><label>Monto para el colaborador<input name="collaborator_amount" type="number" min="0" step="0.01" required value="${r.collaborator_amount||0}"></label><label>Moneda<select name="currency">${currencyOptions(r.currency||"USD")}</select></label><label>Estado de cobro<select name="client_status"><option value="pending" ${r.client_status!=="paid"?"selected":""}>Pendiente</option><option value="paid" ${r.client_status==="paid"?"selected":""}>Pagado</option></select></label><label>Cobrar al cliente<select name="billable_to_client"><option value="true" ${r.billable_to_client!==false?"selected":""}>Sí</option><option value="false" ${r.billable_to_client===false?"selected":""}>No</option></select></label><label class="field-full">Descripción<textarea name="description">${esc(r.description||"")}</textarea></label><label class="field-full">Notas<textarea name="notes">${esc(r.notes||"")}</textarea></label>${save}`};
-    if(type==="payment")return{title:r.id?"Editar pago":"Registrar pago",html:`<label>Colaborador<select name="collaborator_id" required>${optionList(state.users.filter(u=>u.active&&u.role!=="viewer"),"id","full_name",r.collaborator_id)}</select></label><label>Proyecto<select name="project_id"><option value="">Sin proyecto</option>${optionList(state.projects,"id","title",r.project_id)}</select></label><label>Concepto<input name="concept" required value="${esc(r.concept||"")}"></label><label>Monto<input name="amount" type="number" min="0" step="0.01" required value="${r.amount||0}"></label><label>Moneda<select name="currency">${currencyOptions(r.currency||"USD")}</select></label><label>Método de pago<select name="payment_method">${paymentMethodOptions(r.payment_method)}</select></label><label>Estado<select name="status">${paymentStatusOptions(r.status)}</select></label><label>Comprobante o referencia (texto)<input name="reference" value="${esc(r.reference||"")}"></label><label>Vencimiento<input name="due_date" type="date" value="${r.due_date||""}"></label><label>Fecha de pago<input name="paid_date" type="date" value="${r.paid_date||""}"></label><label class="field-full">Adjuntar comprobante (foto, PDF o Excel)<input type="file" name="receipt_file" accept="image/*,.pdf,.xlsx,.xls,.csv"></label>${r.receipt_name?`<p class="field-full muted">Comprobante actual: ${esc(r.receipt_name)} — <button type="button" class="link-button" data-action="view-receipt" data-id="${r.id}">ver</button>. Elige otro archivo arriba para reemplazarlo.</p>`:""}<label class="field-full">Notas<textarea name="notes">${esc(r.notes||"")}</textarea></label>${save}`};
+    if(type==="payment")return{title:r.id?"Editar pago":"Registrar pago",html:`<label>Colaborador<select name="collaborator_id" required>${optionList(state.users.filter(u=>u.active&&u.role!=="viewer"),"id","full_name",r.collaborator_id)}</select></label><label>Proyecto<select name="project_id"><option value="">Sin proyecto</option>${optionList(state.projects,"id","title",r.project_id)}</select></label><label>Concepto<input name="concept" required value="${esc(r.concept||"")}"></label><label>Monto total pactado<input name="amount" type="number" min="0" step="0.01" required value="${r.amount||0}"></label><label>Monto abonado hasta ahora<input name="paid_amount" type="number" min="0" step="0.01" value="${r.paid_amount||0}"></label><label>Moneda<select name="currency">${currencyOptions(r.currency||"USD")}</select></label><label>Método de pago<select name="payment_method">${paymentMethodOptions(r.payment_method)}</select></label><label>Estado<select name="status">${paymentStatusOptions(r.status)}</select></label><label>Comprobante o referencia (texto)<input name="reference" value="${esc(r.reference||"")}"></label><label>Vencimiento<input name="due_date" type="date" value="${r.due_date||""}"></label><label>Fecha de pago<input name="paid_date" type="date" value="${r.paid_date||""}"></label><label class="field-full">Adjuntar comprobante (foto, PDF o Excel)<input type="file" name="receipt_file" accept="image/*,.pdf,.xlsx,.xls,.csv"></label>${r.receipt_name?`<p class="field-full muted">Comprobante actual: ${esc(r.receipt_name)} — <button type="button" class="link-button" data-action="view-receipt" data-id="${r.id}">ver</button>. Elige otro archivo arriba para reemplazarlo.</p>`:""}<label class="field-full">Notas<textarea name="notes">${esc(r.notes||"")}</textarea></label>${save}`};
     if(type==="user"){
       const isSelf = r.id && r.id===state.profile.id;
       return{title:r.id?"Editar usuario":"Crear usuario",html:`<label>Nombre completo<input name="full_name" required value="${esc(r.full_name||"")}"></label><label>Usuario<input name="username" required pattern="[a-z0-9._-]+" value="${esc(r.username||"")}" ${r.id?"readonly":""} placeholder="daniel.perez"></label><label>Email real (acceso y recuperación)<input name="contact_email" type="email" required value="${esc(r.contact_email||"")}" ${r.id?"readonly":""} placeholder="nombre.apellido@solidobusiness.com"></label><label>Cargo<input name="job_title_en" required value="${esc(r.job_title_en||"")}" placeholder="Web Developer & Graphic Designer"></label>${!isSelf?`<label>Permiso<select name="role"><option value="collaborator" ${r.role!=="admin"&&r.role!=="viewer"?"selected":""}>Collaborator — acceso privado</option><option value="viewer" ${r.role==="viewer"?"selected":""}>Viewer — ve todo (sin montos de dinero), solo lectura</option><option value="admin" ${r.role==="admin"?"selected":""}>Administrator — puede ver y administrar todo</option></select></label>`:""}${!r.id?`<label>Contraseña temporal<input name="password" type="password" minlength="8" required autocomplete="new-password"></label>`:""}${!isSelf?`<label>Estado<select name="active"><option value="true" ${r.active!==false?"selected":""}>Activo</option><option value="false" ${r.active===false?"selected":""}>Inactivo</option></select></label>`:""}${isSelf?`<p class="field-full muted">Tu permiso (Administrator) y estado no se pueden cambiar desde aquí, para que no pierdas el acceso por accidente. Pide a otro administrador si necesitas cambiarlos.</p>`:""}${save}`};
@@ -713,13 +722,17 @@
       const receiptFile = type==="payment" ? formData.get("receipt_file") : null;
       formData.delete("receipt_file");
       const form=Object.fromEntries(formData.entries());
-      ["quoted_amount","client_paid","amount","client_price","collaborator_amount","collaborator_budget"].forEach(k=>{if(k in form)form[k]=Number(form[k]||0)});
+      ["quoted_amount","client_paid","amount","client_price","collaborator_amount","collaborator_budget","paid_amount"].forEach(k=>{if(k in form)form[k]=Number(form[k]||0)});
       // Los campos de fecha y las referencias opcionales (ej. "Sin proyecto") llegan como
       // cadena vacía "" desde el formulario, pero Postgres rechaza "" para columnas date/uuid.
       // Los convertimos a null para que se guarden correctamente como "sin valor".
       ["start_date","due_date","paid_date","extra_date","project_id"].forEach(k=>{if(k in form && form[k]==="")form[k]=null;});
       if("billable_to_client" in form)form.billable_to_client=form.billable_to_client==="true";
       if("active" in form)form.active=form.active==="true";
+      // Si se marca el pago como "Pagado", forzamos que lo abonado sea igual al monto
+      // total pactado — evita que quede desactualizado si alguien cambia el estado a
+      // Pagado pero se olvida de actualizar el campo "Monto abonado".
+      if(type==="payment" && form.status==="paid") form.paid_amount = form.amount;
       let savedId=id;
       if(type==="user") {
         form.username = normalizeUsername(form.username);
