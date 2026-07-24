@@ -57,7 +57,26 @@
   const formatDate = value => value ? new Intl.DateTimeFormat("es-AR", {day:"2-digit",month:"short",year:"numeric"}).format(new Date(`${value}T12:00:00`)) : "Sin fecha";
   const statusLabel = value => PROJECT_STATUSES.find(([key]) => key === value)?.[1] || value || "Sin estado";
   const statusClass = value => ({completed:"completed",cancelled:"cancelled",pending_payment:"pending",pending_closure:"waiting",awaiting_client:"waiting",awaiting_approval:"waiting",not_started:"pending",paid:"paid",partial:"waiting",pending:"pending",active:"active"}[value] || "");
-  const formatMoney = (amount, currency = "USD") => new Intl.NumberFormat(currency === "ARS" ? "es-AR" : "en-US", {style:"currency",currency,maximumFractionDigits: currency === "ARS" ? 0 : 2}).format(Number(amount || 0));
+  // Cotización del dólar blue (mercado real/paralelo en Argentina, el tipo de cambio que
+  // se acerca más a lo que de verdad se recibe con remesas como Remitly, muy distinto del
+  // dólar oficial). Se actualiza sola cada pocos minutos mientras la app está abierta.
+  let fxRate = null;
+  async function refreshFxRate() {
+    try {
+      const res = await fetch("https://dolarapi.com/v1/dolares/blue");
+      const data = await res.json();
+      const value = Number(data?.venta);
+      if (value > 0) fxRate = value;
+    } catch (e) { console.warn("No se pudo actualizar la cotización del dólar.", e); }
+  }
+  const formatMoney = (amount, currency = "USD") => {
+    const base = new Intl.NumberFormat(currency === "ARS" ? "es-AR" : "en-US", {style:"currency",currency,maximumFractionDigits: currency === "ARS" ? 0 : 2}).format(Number(amount || 0));
+    if (currency === "USD" && fxRate) {
+      const ars = new Intl.NumberFormat("es-AR", {style:"currency",currency:"ARS",maximumFractionDigits:0}).format(Number(amount || 0) * fxRate);
+      return `${base} <span class="fx-equiv">≈ ${ars}</span>`;
+    }
+    return base;
+  };
   const isAdmin = () => state.profile?.role === "admin";
   const normalizeUsername = value => String(value || "").trim().toLowerCase().replace(/\s+/g, ".").replace(/[^a-z0-9._-]/g, "");
   const isRecoveryLink = () => /type=recovery/.test(window.location.hash) || /type=recovery/.test(window.location.search);
@@ -197,6 +216,8 @@
   async function initialize() {
     $("#modeBadge").textContent = isSupabaseConfigured ? "Base de datos privada" : "Pendiente de conexión";
     bindEvents();
+    refreshFxRate().then(() => { if (state.profile) renderCurrentView(); });
+    setInterval(() => refreshFxRate().then(() => { if (state.profile) renderCurrentView(); }), 10 * 60 * 1000);
     if (!isSupabaseConfigured) {
       const notice = $("#setupNotice");
       notice.classList.remove("hidden");
