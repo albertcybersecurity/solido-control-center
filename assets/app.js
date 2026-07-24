@@ -78,6 +78,12 @@
     return base;
   };
   const isAdmin = () => state.profile?.role === "admin";
+  // "viewer" = usuario de prueba: puede entrar y ver absolutamente todo (empresas,
+  // proyectos, tareas, extras, pagos) igual que un administrador, pero nunca recibe
+  // los montos de dinero reales (ver projects_for_viewer/extras_for_viewer/
+  // payments_for_viewer en la base de datos, que directamente omiten esas columnas)
+  // y no puede crear, editar ni borrar nada (sin políticas de escritura en la base).
+  const isViewer = () => state.profile?.role === "viewer";
   const normalizeUsername = value => String(value || "").trim().toLowerCase().replace(/\s+/g, ".").replace(/[^a-z0-9._-]/g, "");
   const isRecoveryLink = () => /type=recovery/.test(window.location.hash) || /type=recovery/.test(window.location.search);
 
@@ -138,27 +144,44 @@
       if (error) throw error;
     },
     async load(){
-      const tables = ["companies","projects","project_extras","payments","activities"];
-      const results = await Promise.all(tables.map(async table => {
-        const {data,error} = await supabaseClient.from(table).select("*").order("created_at",{ascending:false});
-        if (error) throw error;
-        return data || [];
-      }));
+      let companies, projects, extras, payments, activities;
+      if (isViewer()) {
+        // El viewer no tiene política de lectura directa sobre projects/project_extras/
+        // payments (por eso NO se consultan esas tablas directamente: devolverían 0
+        // filas). En su lugar entra por estas tres funciones, que sí devuelven todas
+        // las filas pero sin columnas de dinero — el monto real nunca viaja por la red.
+        const [c,p,e,pay] = await Promise.all([
+          supabaseClient.from("companies").select("*").order("created_at",{ascending:false}),
+          supabaseClient.rpc("projects_for_viewer"),
+          supabaseClient.rpc("extras_for_viewer"),
+          supabaseClient.rpc("payments_for_viewer")
+        ]);
+        [companies,projects,extras,payments] = [c,p,e,pay].map(r => { if (r.error) throw r.error; return r.data || []; });
+        activities = []; // el viewer no genera ni necesita ver notificaciones
+      } else {
+        const tables = ["companies","projects","project_extras","payments","activities"];
+        const results = await Promise.all(tables.map(async table => {
+          const {data,error} = await supabaseClient.from(table).select("*").order("created_at",{ascending:false});
+          if (error) throw error;
+          return data || [];
+        }));
+        [companies,projects,extras,payments,activities] = results;
+      }
       let users = [];
       if (isAdmin()) {
         const {data,error} = await supabaseClient.from("profiles").select("*").order("created_at",{ascending:true});
         if (error) throw error;
         users = data || [];
       } else {
-        // Un colaborador solo puede leer su propio perfil completo (RLS), pero ahora
-        // puede ver proyectos/tareas de otras personas (ver más arriba). Sin nombres
-        // de los demás, esos casos mostrarían "Sin asignar" y no podría elegir a un
-        // compañero al asignar una tarea. directory_names() solo expone id+nombre.
+        // Un colaborador (o viewer) solo puede leer su propio perfil completo (RLS),
+        // pero necesita ver nombres de otras personas (proyectos/tareas de otros, o
+        // "Responsable" en cada fila). Sin esto, esos casos mostrarían "Sin asignar".
+        // directory_names() solo expone id+nombre.
         const {data:directory} = await supabaseClient.rpc("directory_names");
         const others = (directory || []).filter(d => d.id !== state.profile.id).map(d => ({id:d.id, full_name:d.full_name, active:true}));
         users = [state.profile, ...others];
       }
-      return {companies:results[0],projects:results[1],extras:results[2],payments:results[3],activities:results[4],users};
+      return {companies,projects,extras,payments,activities,users};
     },
     async upsert(table,record,recordId=null){
       const realTable = table === "extras" ? "project_extras" : table;
@@ -366,22 +389,22 @@
 
   function applyPermissions() {
     $$(".admin-only").forEach(el => el.classList.toggle("hidden",!isAdmin()));
-    $("#paymentsHeading").textContent = isAdmin() ? "Pagos a colaboradores" : "Mis pagos";
-    $("#paymentsSubheading").textContent = isAdmin() ? "Control privado de pagos pendientes y realizados." : "Solo tú puedes ver tus pagos asignados.";
+    $("#paymentsHeading").textContent = isAdmin() ? "Pagos a colaboradores" : (isViewer() ? "Pagos" : "Mis pagos");
+    $("#paymentsSubheading").textContent = isAdmin() ? "Control privado de pagos pendientes y realizados." : (isViewer() ? "Modo de solo lectura: ves todos los registros, pero los montos están ocultos." : "Solo tú puedes ver tus pagos asignados.");
   }
 
   function updateUserUI() {
     const name = state.profile.full_name;
-    const title = state.profile.job_title_en || (isAdmin()?"Administrator":"Collaborator");
+    const title = state.profile.job_title_en || (isAdmin()?"Administrator":isViewer()?"Viewer":"Collaborator");
     $("#headerAvatar").textContent = initials(name); $("#accountAvatar").textContent = initials(name);
     $("#headerUserName").textContent = name; $("#headerUserRole").textContent = title;
     $("#accountName").textContent = name; $("#accountTitle").textContent = title;
     $("#welcomeHeading").textContent = `Hola, ${name.split(" ")[0]}.`;
-    $("#welcomeText").textContent = isAdmin() ? "Aquí tienes el estado actualizado del negocio, proyectos y pagos." : "Aquí tienes tus proyectos asignados, extras y pagos privados.";
+    $("#welcomeText").textContent = isAdmin() ? "Aquí tienes el estado actualizado del negocio, proyectos y pagos." : isViewer() ? "Modo de solo lectura: puedes ver todo el negocio, pero los montos de dinero están ocultos." : "Aquí tienes tus proyectos asignados, extras y pagos privados.";
     $("#profileData").innerHTML = `
       <div class="profile-line"><span>Usuario</span><strong>${esc(state.profile.username || "")}</strong></div>
       <div class="profile-line"><span>Correo de acceso</span><strong>${esc(state.profile.contact_email || "No registrado")}</strong></div>
-      <div class="profile-line"><span>Rol</span><strong>${isAdmin()?"Administrator":"Collaborator"}</strong></div>
+      <div class="profile-line"><span>Rol</span><strong>${isAdmin()?"Administrator":isViewer()?"Viewer (solo lectura, sin montos)":"Collaborator"}</strong></div>
       <div class="profile-line"><span>Cargo</span><strong>${esc(title)}</strong></div>
       <div class="profile-line"><span>Sistema</span><strong>Private Cloud Database</strong></div>`;
   }
@@ -392,7 +415,7 @@
     $$(".view").forEach(el => el.classList.toggle("active",el.id === `view-${view}`));
     $$(".nav-item").forEach(el => el.classList.toggle("active",el.dataset.view === view));
     const titles = {
-      dashboard:["Dashboard","Resumen general"],companies:["Empresas","Base de clientes"],projects:["Proyectos","Control de trabajo"],extras:["Extras","Adicionales por proyecto"],payments:[isAdmin()?"Pagos":"Mis pagos","Control financiero privado"],users:["Usuarios y permisos","Administradores y colaboradores"],account:["Mi cuenta","Perfil y seguridad"]
+      dashboard:["Dashboard","Resumen general"],companies:["Empresas","Base de clientes"],projects:["Proyectos","Control de trabajo"],extras:["Extras","Adicionales por proyecto"],payments:[isAdmin()?"Pagos":(isViewer()?"Pagos":"Mis pagos"),isViewer()?"Solo lectura, sin montos":"Control financiero privado"],users:["Usuarios y permisos","Administradores y colaboradores"],account:["Mi cuenta","Perfil y seguridad"]
     };
     $("#viewTitle").textContent = titles[view][0]; $("#viewKicker").textContent = titles[view][1];
     $("#sidebar").classList.remove("open");
@@ -452,6 +475,11 @@
       ["→","Pendiente por cobrar",clientBalance,"Clientes"],
       ["✔","Total pagado a colaboradores",collaboratorPaid,"Acumulado"],
       ["◔","Pendiente por pagar",collaboratorPending,"Colaboradores"]
+    ] : isViewer() ? [
+      ["◆","Proyectos activos",active,"En curso"],
+      ["⛁","Empresas",state.companies.length,"Clientes"],
+      ["＋","Extras registrados",state.extras.length,"Trabajos adicionales"],
+      ["✓","Proyectos completados",state.projects.filter(p=>p.status==="completed").length,"Finalizados"]
     ] : [
       ["◆","Mis proyectos activos",active,"Asignados"],
       ["＋","Mis extras",state.extras.length,"Trabajos adicionales"],
@@ -465,14 +493,14 @@
     $("#pipelineChart").innerHTML = PROJECT_STATUSES.map(([key,label])=>`<div class="pipeline-row"><span>${label}</span><div class="pipeline-track"><div class="pipeline-fill" style="width:${(counts[key]/max)*100}%"></div></div><strong>${counts[key]}</strong></div>`).join("");
 
     if (isAdmin()) {
-      const collaborators = state.users.filter(u=>u.active);
+      const collaborators = state.users.filter(u=>u.active && u.role!=="viewer");
       const byCollab = collaborators.map(u=>({name:u.full_name,count:state.projects.filter(p=>p.assigned_to===u.id && !["completed","cancelled"].includes(p.status)).length}));
       const maxC = Math.max(1,...byCollab.map(x=>x.count));
       $("#collaboratorBreakdown").innerHTML = byCollab.length ? byCollab.map(x=>`<div class="pipeline-row"><span>${esc(x.name)}</span><div class="pipeline-track"><div class="pipeline-fill" style="width:${(x.count/maxC)*100}%"></div></div><strong>${x.count}</strong></div>`).join("") : empty("No hay colaboradores activos");
     }
 
     const pending = state.payments.filter(p=>p.status!=="paid").sort((a,b)=>(a.due_date||"9999").localeCompare(b.due_date||"9999")).slice(0,5);
-    $("#pendingPaymentsList").innerHTML = pending.length ? pending.map(p=>`<div class="mini-item"><div class="mini-icon">$</div><div><strong>${esc(p.concept)}</strong><small>${formatMoney(p.amount,p.currency)} · ${formatDate(p.due_date)}</small></div></div>`).join("") : empty("No hay pagos pendientes");
+    $("#pendingPaymentsList").innerHTML = pending.length ? pending.map(p=>`<div class="mini-item"><div class="mini-icon">$</div><div><strong>${esc(p.concept)}</strong><small>${isViewer()?"Monto oculto":formatMoney(p.amount,p.currency)} · ${formatDate(p.due_date)}</small></div></div>`).join("") : empty("No hay pagos pendientes");
 
     const activities = state.activities.slice(0,6);
     $("#activityList").innerHTML = activities.length ? activities.map(a=>`<div class="activity-item"><div class="mini-icon">↗</div><div><strong>${esc(a.action)}</strong><small>${new Date(a.created_at).toLocaleString("es-AR")}</small></div></div>`).join("") : empty("Todavía no hay actividad");
@@ -541,20 +569,20 @@
       if (dateTo && (!refDate || refDate>dateTo)) return false;
       return true;
     });
-    const pending=currencyTotals(rows,"amount",p=>p.status!=="paid"), paid=currencyTotals(rows,"amount",p=>p.status==="paid");
+    const pending=isViewer()?"Oculto":currencyTotals(rows,"amount",p=>p.status!=="paid"), paid=isViewer()?"Oculto":currencyTotals(rows,"amount",p=>p.status==="paid");
     $("#paymentSummary").innerHTML=`<article class="summary-card"><span>Pendiente</span><strong>${pending}</strong></article><article class="summary-card"><span>Pagado</span><strong>${paid}</strong></article><article class="summary-card"><span>Registros</span><strong>${rows.length}</strong></article>`;
     const statusText = {paid:"Pagado",partial:"Parcial",pending:"Pendiente"};
-    $("#paymentsTable").innerHTML=rows.length?rows.map(p=>`<tr><td>${esc(userName(p.collaborator_id))}</td><td class="row-title"><strong>${esc(p.concept)}</strong><small>${esc(p.payment_method||"")}${p.reference?` · ${esc(p.reference)}`:""}</small></td><td>${esc(projectName(p.project_id)||"Sin proyecto")}</td><td>${formatMoney(p.amount,p.currency)}</td><td><span class="status-chip ${statusClass(p.status)}">${statusText[p.status]||"Pendiente"}</span></td><td>${formatDate(p.due_date)}</td><td>${isAdmin()?`<button class="btn outline" data-action="edit-payment" data-id="${p.id}">Editar</button> ${p.receipt_path?`<button class="btn outline" data-action="view-receipt" data-id="${p.id}">📎 Comprobante</button> `:""}<button class="btn danger" data-action="delete-payment" data-id="${p.id}">Eliminar</button>`:(p.receipt_path?`<button class="btn outline" data-action="view-receipt" data-id="${p.id}">📎 Ver comprobante</button>`:"—")}</td></tr>`).join(""):`<tr><td colspan="7">${empty("No se encontraron pagos")}</td></tr>`;
+    $("#paymentsTable").innerHTML=rows.length?rows.map(p=>`<tr><td>${esc(userName(p.collaborator_id))}</td><td class="row-title"><strong>${esc(p.concept)}</strong><small>${esc(p.payment_method||"")}${p.reference?` · ${esc(p.reference)}`:""}</small></td><td>${esc(projectName(p.project_id)||"Sin proyecto")}</td><td>${isViewer()?'<span class="status-chip">Oculto</span>':formatMoney(p.amount,p.currency)}</td><td><span class="status-chip ${statusClass(p.status)}">${statusText[p.status]||"Pendiente"}</span></td><td>${formatDate(p.due_date)}</td><td>${isAdmin()?`<button class="btn outline" data-action="edit-payment" data-id="${p.id}">Editar</button> ${p.receipt_path?`<button class="btn outline" data-action="view-receipt" data-id="${p.id}">📎 Comprobante</button> `:""}<button class="btn danger" data-action="delete-payment" data-id="${p.id}">Eliminar</button>`:(isViewer()?"—":(p.receipt_path?`<button class="btn outline" data-action="view-receipt" data-id="${p.id}">📎 Ver comprobante</button>`:"—"))}</td></tr>`).join(""):`<tr><td colspan="7">${empty("No se encontraron pagos")}</td></tr>`;
   }
 
   function renderUsers() {
     if (!isAdmin()) return;
-    $("#usersGrid").innerHTML=state.users.length?state.users.map(u=>`<article class="data-card"><div class="data-card-head"><div style="display:flex;gap:12px;align-items:center"><span class="avatar">${initials(u.full_name)}</span><div><h3>${esc(u.full_name)}</h3><p>${esc(u.job_title_en||"")}</p></div></div><span class="status-chip ${u.active?"active":"pending"}">${u.active?"Activo":"Inactivo"}</span></div><div class="card-meta"><div class="meta-line"><span>Usuario</span><strong>${esc(u.username||"—")}</strong></div><div class="meta-line"><span>Correo de acceso</span><strong>${esc(u.contact_email||"—")}</strong></div><div class="meta-line"><span>Rol</span><strong>${u.role==="admin"?"Administrator":"Collaborator"}</strong></div><div class="meta-line"><span>Proyectos</span><strong>${state.projects.filter(p=>p.assigned_to===u.id).length}</strong></div></div>${u.id===state.profile.id?`<div class="card-actions"><button class="btn outline" data-action="edit-user" data-id="${u.id}">Editar</button><span class="muted" style="font-size:.78rem">Este eres tú — cambia tu contraseña desde "Mi cuenta".</span></div>`:`<div class="card-actions"><button class="btn outline" data-action="edit-user" data-id="${u.id}">Editar</button><button class="btn outline" data-action="reset-user-password" data-id="${u.id}">Nueva clave</button><button class="btn ${u.active?"danger":"primary"}" data-action="toggle-user" data-id="${u.id}">${u.active?"Desactivar":"Activar"}</button></div>`}</article>`).join(""):empty("No hay usuarios registrados");
+    $("#usersGrid").innerHTML=state.users.length?state.users.map(u=>`<article class="data-card"><div class="data-card-head"><div style="display:flex;gap:12px;align-items:center"><span class="avatar">${initials(u.full_name)}</span><div><h3>${esc(u.full_name)}</h3><p>${esc(u.job_title_en||"")}</p></div></div><span class="status-chip ${u.active?"active":"pending"}">${u.active?"Activo":"Inactivo"}</span></div><div class="card-meta"><div class="meta-line"><span>Usuario</span><strong>${esc(u.username||"—")}</strong></div><div class="meta-line"><span>Correo de acceso</span><strong>${esc(u.contact_email||"—")}</strong></div><div class="meta-line"><span>Rol</span><strong>${u.role==="admin"?"Administrator":u.role==="viewer"?"Viewer":"Collaborator"}</strong></div><div class="meta-line"><span>Proyectos</span><strong>${state.projects.filter(p=>p.assigned_to===u.id).length}</strong></div></div>${u.id===state.profile.id?`<div class="card-actions"><button class="btn outline" data-action="edit-user" data-id="${u.id}">Editar</button><span class="muted" style="font-size:.78rem">Este eres tú — cambia tu contraseña desde "Mi cuenta".</span></div>`:`<div class="card-actions"><button class="btn outline" data-action="edit-user" data-id="${u.id}">Editar</button><button class="btn outline" data-action="reset-user-password" data-id="${u.id}">Nueva clave</button><button class="btn ${u.active?"danger":"primary"}" data-action="toggle-user" data-id="${u.id}">${u.active?"Desactivar":"Activar"}</button></div>`}</article>`).join(""):empty("No hay usuarios registrados");
   }
 
   function populateFilters() {
     $("#projectStatusFilter").innerHTML=`<option value="all">Todos los estados</option>${PROJECT_STATUSES.map(([k,v])=>`<option value="${k}">${v}</option>`).join("")}`;
-    const collaborators=state.users.filter(u=>u.active);
+    const collaborators=state.users.filter(u=>u.active&&u.role!=="viewer");
     const options=collaborators.map(u=>`<option value="${u.id}">${esc(u.full_name)}</option>`).join("");
     $("#projectAssigneeFilter").innerHTML=`<option value="all">Todos los colaboradores</option>${options}`;
     $("#paymentUserFilter").innerHTML=`<option value="all">Todos los colaboradores</option>${options}`;
@@ -590,31 +618,35 @@
     $("#modalTitle").textContent=project.title;
     $("#modalForm").onsubmit=event=>event.preventDefault();
     const taskSuggestions = ["Diseño web","Logotipo","Tarjetas de presentación","Manejo de redes sociales","Contenido para redes","Diseño de flyer","Edición de video","Fotografía","Mantenimiento web","Hosting y dominio","SEO básico","Cotización","Entrega final"];
-    $("#modalForm").innerHTML=`
-      <div class="task-list field-full" id="taskList"><p class="muted">Cargando tareas…</p></div>
+    const addRow = isViewer() ? "" : `
       <div class="task-add-row field-full">
         <input type="text" id="newTaskTitle" list="taskSuggestions" placeholder="Nueva tarea… (elige o escribe)">
         <datalist id="taskSuggestions">${taskSuggestions.map(t=>`<option value="${esc(t)}">`).join("")}</datalist>
-        <select id="newTaskAssignee">${optionList(state.users.filter(u=>u.active),"id","full_name",project.assigned_to)}</select>
+        <select id="newTaskAssignee">${optionList(state.users.filter(u=>u.active&&u.role!=="viewer"),"id","full_name",project.assigned_to)}</select>
         <button type="button" id="addTaskBtn" class="btn primary">Agregar</button>
-      </div>
+      </div>`;
+    $("#modalForm").innerHTML=`
+      <div class="task-list field-full" id="taskList"><p class="muted">Cargando tareas…</p></div>
+      ${addRow}
       <div class="modal-actions"><button type="button" class="btn outline" onclick="document.getElementById('closeModalBtn').click()">Cerrar</button></div>`;
     $("#modalBackdrop").classList.remove("hidden");
-    $("#addTaskBtn").addEventListener("click",async()=>{
-      const input=$("#newTaskTitle");
-      const title=input.value.trim();
-      const assignedTo=$("#newTaskAssignee").value;
-      if(!title)return;
-      try{
-        await db.createTask(projectId,title,assignedTo);
-        notify(assignedTo, `Se te asignó la tarea "${title}" en el proyecto "${project.title}".`);
-        input.value=""; await renderTaskList(projectId);
-      }
-      catch(e){toast(e.message||"No se pudo agregar la tarea.","error");}
-    });
-    $("#newTaskTitle").addEventListener("keydown",event=>{
-      if(event.key==="Enter"){ event.preventDefault(); $("#addTaskBtn").click(); }
-    });
+    if (!isViewer()) {
+      $("#addTaskBtn").addEventListener("click",async()=>{
+        const input=$("#newTaskTitle");
+        const title=input.value.trim();
+        const assignedTo=$("#newTaskAssignee").value;
+        if(!title)return;
+        try{
+          await db.createTask(projectId,title,assignedTo);
+          notify(assignedTo, `Se te asignó la tarea "${title}" en el proyecto "${project.title}".`);
+          input.value=""; await renderTaskList(projectId);
+        }
+        catch(e){toast(e.message||"No se pudo agregar la tarea.","error");}
+      });
+      $("#newTaskTitle").addEventListener("keydown",event=>{
+        if(event.key==="Enter"){ event.preventDefault(); $("#addTaskBtn").click(); }
+      });
+    }
     await renderTaskList(projectId);
   }
 
@@ -626,22 +658,24 @@
       const tasks=await db.loadTasks(projectId);
       container.innerHTML = tasks.length ? tasks.map(t=>`
         <div class="task-item ${t.done?"done":""}">
-          <label class="task-check"><input type="checkbox" data-task-id="${t.id}" data-task-title="${esc(t.title)}" ${t.done?"checked":""}><span>${esc(t.title)}<small class="task-assignee">👤 ${esc(userName(t.assigned_to))}</small></span></label>
-          <button type="button" class="icon-button" data-task-delete="${t.id}" aria-label="Eliminar tarea">×</button>
+          <label class="task-check"><input type="checkbox" data-task-id="${t.id}" data-task-title="${esc(t.title)}" ${t.done?"checked":""} ${isViewer()?"disabled":""}><span>${esc(t.title)}<small class="task-assignee">👤 ${esc(userName(t.assigned_to))}</small></span></label>
+          ${isViewer()?"":`<button type="button" class="icon-button" data-task-delete="${t.id}" aria-label="Eliminar tarea">×</button>`}
         </div>`).join("") : `<p class="muted">Todavía no hay tareas para este proyecto.</p>`;
-      $$("input[data-task-id]",container).forEach(input=>input.addEventListener("change",async()=>{
-        try{
-          await db.toggleTask(input.dataset.taskId,input.checked);
-          if(input.checked && project) notify(project.assigned_to, `Se completó la tarea "${input.dataset.taskTitle}" en el proyecto "${project.title}".`);
-          await renderTaskList(projectId);
-        }
-        catch(e){toast(e.message||"No se pudo actualizar la tarea.","error");}
-      }));
-      $$("[data-task-delete]",container).forEach(btn=>btn.addEventListener("click",async()=>{
-        if(!confirm("¿Eliminar esta tarea?"))return;
-        try{ await db.deleteTask(btn.dataset.taskDelete); await renderTaskList(projectId); }
-        catch(e){toast(e.message||"No se pudo eliminar la tarea.","error");}
-      }));
+      if (!isViewer()) {
+        $$("input[data-task-id]",container).forEach(input=>input.addEventListener("change",async()=>{
+          try{
+            await db.toggleTask(input.dataset.taskId,input.checked);
+            if(input.checked && project) notify(project.assigned_to, `Se completó la tarea "${input.dataset.taskTitle}" en el proyecto "${project.title}".`);
+            await renderTaskList(projectId);
+          }
+          catch(e){toast(e.message||"No se pudo actualizar la tarea.","error");}
+        }));
+        $$("[data-task-delete]",container).forEach(btn=>btn.addEventListener("click",async()=>{
+          if(!confirm("¿Eliminar esta tarea?"))return;
+          try{ await db.deleteTask(btn.dataset.taskDelete); await renderTaskList(projectId); }
+          catch(e){toast(e.message||"No se pudo eliminar la tarea.","error");}
+        }));
+      }
     } catch(e) {
       container.innerHTML = `<p class="muted">No se pudieron cargar las tareas.</p>`;
     }
@@ -661,12 +695,12 @@
     r=r||{};
     const save=`<div class="modal-actions"><button type="button" class="btn outline" onclick="document.getElementById('closeModalBtn').click()">Cancelar</button><button type="submit" class="btn primary">Guardar</button></div>`;
     if(type==="company")return{title:r.id?"Editar empresa":"Agregar empresa",html:`<label>Empresa<input name="name" required value="${esc(r.name||"")}"></label><label>Persona de contacto<input name="contact_name" value="${esc(r.contact_name||"")}"></label><label>Correo<input name="email" type="email" value="${esc(r.email||"")}"></label><label>Teléfono<input name="phone" value="${esc(r.phone||"")}"></label><label class="field-full">Dirección<input name="address" value="${esc(r.address||"")}"></label><label class="field-full">Notas internas<textarea name="notes">${esc(r.notes||"")}</textarea></label>${save}`};
-    if(type==="project")return{title:r.id?"Editar proyecto":"Nuevo proyecto",html:`<label>Nombre del proyecto<input name="title" required value="${esc(r.title||"")}"></label><label>Empresa<select name="company_id" required><option value="">Seleccionar</option>${optionList(state.companies,"id","name",r.company_id)}</select></label><label>Tipo de trabajo<input name="work_type" required value="${esc(r.work_type||"")}" placeholder="Web Design & Development"></label><label>Responsable<select name="assigned_to" required>${optionList(state.users.filter(u=>u.active),"id","full_name",r.assigned_to||(!isAdmin()?state.profile.id:""))}</select></label><label>Estado<select name="status">${statusOptions(r.status||"not_started")}</select></label><label>Moneda<select name="currency">${currencyOptions(r.currency||"USD")}</select></label><label>Monto acordado con el cliente<input name="quoted_amount" type="number" min="0" step="0.01" value="${r.quoted_amount||0}"></label><label>Cobrado al cliente<input name="client_paid" type="number" min="0" step="0.01" value="${r.client_paid||0}"></label><label>Monto acordado con el colaborador<input name="collaborator_budget" type="number" min="0" step="0.01" value="${r.collaborator_budget||0}"></label><label>Fecha de inicio<input name="start_date" type="date" value="${r.start_date||today()}"></label><label>Fecha límite<input name="due_date" type="date" value="${r.due_date||""}"></label><label class="field-full">Descripción<textarea name="description">${esc(r.description||"")}</textarea></label><label class="field-full">Notas internas<textarea name="notes">${esc(r.notes||"")}</textarea></label>${save}`};
-    if(type==="extra")return{title:r.id?"Editar extra":"Agregar extra",html:`<label>Proyecto<select name="project_id" required>${optionList(state.projects,"id","title",r.project_id)}</select></label><label>Responsable<select name="assigned_to" required>${optionList(state.users.filter(u=>u.active),"id","full_name",r.assigned_to)}</select></label><label>Nombre del extra<input name="title" required value="${esc(r.title||"")}"></label><label>Fecha<input name="extra_date" type="date" value="${r.extra_date||today()}"></label><label>Precio cobrado al cliente<input name="client_price" type="number" min="0" step="0.01" required value="${r.client_price||0}"></label><label>Monto para el colaborador<input name="collaborator_amount" type="number" min="0" step="0.01" required value="${r.collaborator_amount||0}"></label><label>Moneda<select name="currency">${currencyOptions(r.currency||"USD")}</select></label><label>Estado de cobro<select name="client_status"><option value="pending" ${r.client_status!=="paid"?"selected":""}>Pendiente</option><option value="paid" ${r.client_status==="paid"?"selected":""}>Pagado</option></select></label><label>Cobrar al cliente<select name="billable_to_client"><option value="true" ${r.billable_to_client!==false?"selected":""}>Sí</option><option value="false" ${r.billable_to_client===false?"selected":""}>No</option></select></label><label class="field-full">Descripción<textarea name="description">${esc(r.description||"")}</textarea></label><label class="field-full">Notas<textarea name="notes">${esc(r.notes||"")}</textarea></label>${save}`};
-    if(type==="payment")return{title:r.id?"Editar pago":"Registrar pago",html:`<label>Colaborador<select name="collaborator_id" required>${optionList(state.users.filter(u=>u.active),"id","full_name",r.collaborator_id)}</select></label><label>Proyecto<select name="project_id"><option value="">Sin proyecto</option>${optionList(state.projects,"id","title",r.project_id)}</select></label><label>Concepto<input name="concept" required value="${esc(r.concept||"")}"></label><label>Monto<input name="amount" type="number" min="0" step="0.01" required value="${r.amount||0}"></label><label>Moneda<select name="currency">${currencyOptions(r.currency||"USD")}</select></label><label>Método de pago<select name="payment_method">${paymentMethodOptions(r.payment_method)}</select></label><label>Estado<select name="status">${paymentStatusOptions(r.status)}</select></label><label>Comprobante o referencia (texto)<input name="reference" value="${esc(r.reference||"")}"></label><label>Vencimiento<input name="due_date" type="date" value="${r.due_date||""}"></label><label>Fecha de pago<input name="paid_date" type="date" value="${r.paid_date||""}"></label><label class="field-full">Adjuntar comprobante (foto, PDF o Excel)<input type="file" name="receipt_file" accept="image/*,.pdf,.xlsx,.xls,.csv"></label>${r.receipt_name?`<p class="field-full muted">Comprobante actual: ${esc(r.receipt_name)} — <button type="button" class="link-button" data-action="view-receipt" data-id="${r.id}">ver</button>. Elige otro archivo arriba para reemplazarlo.</p>`:""}<label class="field-full">Notas<textarea name="notes">${esc(r.notes||"")}</textarea></label>${save}`};
+    if(type==="project")return{title:r.id?"Editar proyecto":"Nuevo proyecto",html:`<label>Nombre del proyecto<input name="title" required value="${esc(r.title||"")}"></label><label>Empresa<select name="company_id" required><option value="">Seleccionar</option>${optionList(state.companies,"id","name",r.company_id)}</select></label><label>Tipo de trabajo<input name="work_type" required value="${esc(r.work_type||"")}" placeholder="Web Design & Development"></label><label>Responsable<select name="assigned_to" required>${optionList(state.users.filter(u=>u.active&&u.role!=="viewer"),"id","full_name",r.assigned_to||(!isAdmin()?state.profile.id:""))}</select></label><label>Estado<select name="status">${statusOptions(r.status||"not_started")}</select></label><label>Moneda<select name="currency">${currencyOptions(r.currency||"USD")}</select></label><label>Monto acordado con el cliente<input name="quoted_amount" type="number" min="0" step="0.01" value="${r.quoted_amount||0}"></label><label>Cobrado al cliente<input name="client_paid" type="number" min="0" step="0.01" value="${r.client_paid||0}"></label><label>Monto acordado con el colaborador<input name="collaborator_budget" type="number" min="0" step="0.01" value="${r.collaborator_budget||0}"></label><label>Fecha de inicio<input name="start_date" type="date" value="${r.start_date||today()}"></label><label>Fecha límite<input name="due_date" type="date" value="${r.due_date||""}"></label><label class="field-full">Descripción<textarea name="description">${esc(r.description||"")}</textarea></label><label class="field-full">Notas internas<textarea name="notes">${esc(r.notes||"")}</textarea></label>${save}`};
+    if(type==="extra")return{title:r.id?"Editar extra":"Agregar extra",html:`<label>Proyecto<select name="project_id" required>${optionList(state.projects,"id","title",r.project_id)}</select></label><label>Responsable<select name="assigned_to" required>${optionList(state.users.filter(u=>u.active&&u.role!=="viewer"),"id","full_name",r.assigned_to)}</select></label><label>Nombre del extra<input name="title" required value="${esc(r.title||"")}"></label><label>Fecha<input name="extra_date" type="date" value="${r.extra_date||today()}"></label><label>Precio cobrado al cliente<input name="client_price" type="number" min="0" step="0.01" required value="${r.client_price||0}"></label><label>Monto para el colaborador<input name="collaborator_amount" type="number" min="0" step="0.01" required value="${r.collaborator_amount||0}"></label><label>Moneda<select name="currency">${currencyOptions(r.currency||"USD")}</select></label><label>Estado de cobro<select name="client_status"><option value="pending" ${r.client_status!=="paid"?"selected":""}>Pendiente</option><option value="paid" ${r.client_status==="paid"?"selected":""}>Pagado</option></select></label><label>Cobrar al cliente<select name="billable_to_client"><option value="true" ${r.billable_to_client!==false?"selected":""}>Sí</option><option value="false" ${r.billable_to_client===false?"selected":""}>No</option></select></label><label class="field-full">Descripción<textarea name="description">${esc(r.description||"")}</textarea></label><label class="field-full">Notas<textarea name="notes">${esc(r.notes||"")}</textarea></label>${save}`};
+    if(type==="payment")return{title:r.id?"Editar pago":"Registrar pago",html:`<label>Colaborador<select name="collaborator_id" required>${optionList(state.users.filter(u=>u.active&&u.role!=="viewer"),"id","full_name",r.collaborator_id)}</select></label><label>Proyecto<select name="project_id"><option value="">Sin proyecto</option>${optionList(state.projects,"id","title",r.project_id)}</select></label><label>Concepto<input name="concept" required value="${esc(r.concept||"")}"></label><label>Monto<input name="amount" type="number" min="0" step="0.01" required value="${r.amount||0}"></label><label>Moneda<select name="currency">${currencyOptions(r.currency||"USD")}</select></label><label>Método de pago<select name="payment_method">${paymentMethodOptions(r.payment_method)}</select></label><label>Estado<select name="status">${paymentStatusOptions(r.status)}</select></label><label>Comprobante o referencia (texto)<input name="reference" value="${esc(r.reference||"")}"></label><label>Vencimiento<input name="due_date" type="date" value="${r.due_date||""}"></label><label>Fecha de pago<input name="paid_date" type="date" value="${r.paid_date||""}"></label><label class="field-full">Adjuntar comprobante (foto, PDF o Excel)<input type="file" name="receipt_file" accept="image/*,.pdf,.xlsx,.xls,.csv"></label>${r.receipt_name?`<p class="field-full muted">Comprobante actual: ${esc(r.receipt_name)} — <button type="button" class="link-button" data-action="view-receipt" data-id="${r.id}">ver</button>. Elige otro archivo arriba para reemplazarlo.</p>`:""}<label class="field-full">Notas<textarea name="notes">${esc(r.notes||"")}</textarea></label>${save}`};
     if(type==="user"){
       const isSelf = r.id && r.id===state.profile.id;
-      return{title:r.id?"Editar usuario":"Crear usuario",html:`<label>Nombre completo<input name="full_name" required value="${esc(r.full_name||"")}"></label><label>Usuario<input name="username" required pattern="[a-z0-9._-]+" value="${esc(r.username||"")}" ${r.id?"readonly":""} placeholder="daniel.perez"></label><label>Email real (acceso y recuperación)<input name="contact_email" type="email" required value="${esc(r.contact_email||"")}" ${r.id?"readonly":""} placeholder="nombre.apellido@solidobusiness.com"></label><label>Cargo<input name="job_title_en" required value="${esc(r.job_title_en||"")}" placeholder="Web Developer & Graphic Designer"></label>${!isSelf?`<label>Permiso<select name="role"><option value="collaborator" ${r.role!=="admin"?"selected":""}>Collaborator — acceso privado</option><option value="admin" ${r.role==="admin"?"selected":""}>Administrator — puede ver y administrar todo</option></select></label>`:""}${!r.id?`<label>Contraseña temporal<input name="password" type="password" minlength="8" required autocomplete="new-password"></label>`:""}${!isSelf?`<label>Estado<select name="active"><option value="true" ${r.active!==false?"selected":""}>Activo</option><option value="false" ${r.active===false?"selected":""}>Inactivo</option></select></label>`:""}${isSelf?`<p class="field-full muted">Tu permiso (Administrator) y estado no se pueden cambiar desde aquí, para que no pierdas el acceso por accidente. Pide a otro administrador si necesitas cambiarlos.</p>`:""}${save}`};
+      return{title:r.id?"Editar usuario":"Crear usuario",html:`<label>Nombre completo<input name="full_name" required value="${esc(r.full_name||"")}"></label><label>Usuario<input name="username" required pattern="[a-z0-9._-]+" value="${esc(r.username||"")}" ${r.id?"readonly":""} placeholder="daniel.perez"></label><label>Email real (acceso y recuperación)<input name="contact_email" type="email" required value="${esc(r.contact_email||"")}" ${r.id?"readonly":""} placeholder="nombre.apellido@solidobusiness.com"></label><label>Cargo<input name="job_title_en" required value="${esc(r.job_title_en||"")}" placeholder="Web Developer & Graphic Designer"></label>${!isSelf?`<label>Permiso<select name="role"><option value="collaborator" ${r.role!=="admin"&&r.role!=="viewer"?"selected":""}>Collaborator — acceso privado</option><option value="viewer" ${r.role==="viewer"?"selected":""}>Viewer — ve todo (sin montos de dinero), solo lectura</option><option value="admin" ${r.role==="admin"?"selected":""}>Administrator — puede ver y administrar todo</option></select></label>`:""}${!r.id?`<label>Contraseña temporal<input name="password" type="password" minlength="8" required autocomplete="new-password"></label>`:""}${!isSelf?`<label>Estado<select name="active"><option value="true" ${r.active!==false?"selected":""}>Activo</option><option value="false" ${r.active===false?"selected":""}>Inactivo</option></select></label>`:""}${isSelf?`<p class="field-full muted">Tu permiso (Administrator) y estado no se pueden cambiar desde aquí, para que no pierdas el acceso por accidente. Pide a otro administrador si necesitas cambiarlos.</p>`:""}${save}`};
     }
     return{title:"Registro",html:save};
   }
