@@ -397,3 +397,16 @@ language sql stable security definer set search_path = public as $$
 $$;
 revoke all on function public.payments_for_viewer() from public;
 grant execute on function public.payments_for_viewer() to authenticated;
+
+-- ============================================================================
+-- AGREGADO: separar el "monto total pactado" (payments.amount, ya existía) de lo
+-- que realmente se le fue abonando al colaborador (payments.paid_amount, nuevo).
+-- Antes, un pago "Parcial" no dejaba ver cuánto de ese monto ya se había entregado.
+-- ============================================================================
+
+alter table public.payments add column if not exists paid_amount numeric(14,2) not null default 0;
+
+-- Para pagos que ya estaban marcados como "Pagado" antes de este cambio, asumimos
+-- que se abonó el monto completo (si no, quedarían con paid_amount=0 mostrando
+-- "Pendiente: monto completo" para un pago que en realidad ya estaba saldado).
+update public.payments set paid_amount = amount where status = 'paid' and paid_amount = 0;
