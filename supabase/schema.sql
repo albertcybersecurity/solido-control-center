@@ -1,0 +1,172 @@
+-- SÓLIDO CONTROL CENTER — ESQUEMA DE PRODUCCIÓN
+-- Ejecutar completo en Supabase SQL Editor (proyecto nuevo y vacío).
+
+create extension if not exists pgcrypto;
+create schema if not exists private;
+
+create table if not exists public.profiles (
+  id uuid primary key references auth.users(id) on delete cascade,
+  username text not null,
+  contact_email text,
+  full_name text not null default '',
+  role text not null default 'collaborator' check (role in ('admin','collaborator')),
+  job_title_en text not null default 'Collaborator',
+  active boolean not null default true,
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now(),
+  constraint profiles_username_format check (username ~ '^[a-z0-9._-]+$')
+);
+create unique index if not exists profiles_username_unique_lower on public.profiles (lower(username));
+
+create table if not exists public.companies (
+  id uuid primary key default gen_random_uuid(),
+  name text not null, contact_name text, email text, phone text, address text, notes text,
+  created_by uuid references public.profiles(id),
+  created_at timestamptz not null default now(), updated_at timestamptz not null default now()
+);
+
+create table if not exists public.projects (
+  id uuid primary key default gen_random_uuid(),
+  company_id uuid not null references public.companies(id) on delete restrict,
+  title text not null, work_type text not null, description text,
+  status text not null default 'not_started' check (status in (
+    'not_started','started','in_progress','awaiting_client','awaiting_approval',
+    'pending_payment','pending_closure','completed','cancelled'
+  )),
+  start_date date, due_date date, currency text not null default 'USD' check (currency in ('USD','ARS')),
+  quoted_amount numeric(14,2) not null default 0, client_paid numeric(14,2) not null default 0,
+  assigned_to uuid not null references public.profiles(id) on delete restrict,
+  notes text, created_by uuid references public.profiles(id),
+  created_at timestamptz not null default now(), updated_at timestamptz not null default now()
+);
+
+create table if not exists public.project_extras (
+  id uuid primary key default gen_random_uuid(),
+  project_id uuid not null references public.projects(id) on delete cascade,
+  title text not null,
+  description text,
+  extra_date date not null default current_date,
+  client_price numeric(14,2) not null default 0,
+  collaborator_amount numeric(14,2) not null default 0,
+  currency text not null default 'USD' check (currency in ('USD','ARS')),
+  billable_to_client boolean not null default true,
+  client_status text not null default 'pending' check (client_status in ('pending','paid')),
+  notes text,
+  assigned_to uuid references public.profiles(id), created_by uuid references public.profiles(id),
+  created_at timestamptz not null default now(), updated_at timestamptz not null default now()
+);
+
+create table if not exists public.payments (
+  id uuid primary key default gen_random_uuid(),
+  collaborator_id uuid not null references public.profiles(id) on delete restrict,
+  project_id uuid references public.projects(id) on delete set null,
+  concept text not null, amount numeric(14,2) not null default 0,
+  currency text not null default 'USD' check (currency in ('USD','ARS')),
+  payment_method text,
+  reference text,
+  status text not null default 'pending' check (status in ('pending','partial','paid')),
+  due_date date, paid_date date, notes text, created_by uuid references public.profiles(id),
+  created_at timestamptz not null default now(), updated_at timestamptz not null default now()
+);
+
+create table if not exists public.activities (
+  id uuid primary key default gen_random_uuid(),
+  actor_id uuid not null references public.profiles(id) on delete cascade,
+  action text not null, created_by uuid references public.profiles(id),
+  created_at timestamptz not null default now(), updated_at timestamptz not null default now()
+);
+
+create index if not exists idx_projects_assigned_to on public.projects(assigned_to);
+create index if not exists idx_projects_company_id on public.projects(company_id);
+create index if not exists idx_project_extras_assigned_to on public.project_extras(assigned_to);
+create index if not exists idx_project_extras_project_id on public.project_extras(project_id);
+create index if not exists idx_payments_collaborator_id on public.payments(collaborator_id);
+create index if not exists idx_activities_actor_id on public.activities(actor_id);
+
+create or replace function private.is_admin() returns boolean
+language sql stable security definer set search_path = public as $$
+  select exists(select 1 from public.profiles where id=(select auth.uid()) and role='admin' and active=true);
+$$;
+revoke all on function private.is_admin() from public;
+grant execute on function private.is_admin() to authenticated;
+
+-- Permite iniciar sesión con un nombre de usuario simple (ej. daniel.perez) en vez del
+-- email real. Solo expone el email correspondiente a un username activo; no expone nada
+-- más y es seguro para llamar de forma anónima (antes de autenticarse).
+create or replace function public.email_for_username(p_username text) returns text
+language sql stable security definer set search_path = public as $$
+  select contact_email from public.profiles
+  where lower(username) = lower(trim(p_username)) and active = true
+  limit 1;
+$$;
+revoke all on function public.email_for_username(text) from public;
+grant execute on function public.email_for_username(text) to anon, authenticated;
+
+create or replace function public.handle_new_user() returns trigger
+language plpgsql security definer set search_path = public as $$
+declare derived_username text;
+begin
+  derived_username := lower(coalesce(nullif(new.raw_user_meta_data->>'username',''), split_part(new.email,'@',1)));
+  insert into public.profiles(id,username,contact_email,full_name,role,job_title_en,active)
+  values(
+    new.id,
+    derived_username,
+    coalesce(nullif(new.raw_user_meta_data->>'contact_email',''), new.email),
+    coalesce(new.raw_user_meta_data->>'full_name',''),
+    case when new.raw_user_meta_data->>'role'='admin' then 'admin' else 'collaborator' end,
+    coalesce(new.raw_user_meta_data->>'job_title_en','Collaborator'),
+    true
+  )
+  on conflict(id) do nothing;
+  return new;
+end; $$;
+
+drop trigger if exists on_auth_user_created on auth.users;
+create trigger on_auth_user_created after insert on auth.users for each row execute procedure public.handle_new_user();
+
+alter table public.profiles enable row level security;
+alter table public.companies enable row level security;
+alter table public.projects enable row level security;
+alter table public.project_extras enable row level security;
+alter table public.payments enable row level security;
+alter table public.activities enable row level security;
+
+create policy "profiles_select_own_or_admin" on public.profiles for select to authenticated using ((select auth.uid())=id or (select private.is_admin()));
+create policy "profiles_admin_update" on public.profiles for update to authenticated using ((select private.is_admin())) with check ((select private.is_admin()));
+
+create policy "companies_admin_all" on public.companies for all to authenticated using ((select private.is_admin())) with check ((select private.is_admin()));
+create policy "companies_collaborator_select_assigned" on public.companies for select to authenticated using (exists(select 1 from public.projects p where p.company_id=companies.id and p.assigned_to=(select auth.uid())));
+
+create policy "projects_admin_all" on public.projects for all to authenticated using ((select private.is_admin())) with check ((select private.is_admin()));
+create policy "projects_collaborator_select_own" on public.projects for select to authenticated using (assigned_to=(select auth.uid()));
+
+create policy "extras_admin_all" on public.project_extras for all to authenticated using ((select private.is_admin())) with check ((select private.is_admin()));
+create policy "extras_collaborator_select_own" on public.project_extras for select to authenticated using (assigned_to=(select auth.uid()) or exists(select 1 from public.projects p where p.id=project_extras.project_id and p.assigned_to=(select auth.uid())));
+
+create policy "payments_admin_all" on public.payments for all to authenticated using ((select private.is_admin())) with check ((select private.is_admin()));
+create policy "payments_collaborator_select_own" on public.payments for select to authenticated using (collaborator_id=(select auth.uid()));
+
+create policy "activities_admin_all" on public.activities for all to authenticated using ((select private.is_admin())) with check ((select private.is_admin()));
+create policy "activities_collaborator_select_own" on public.activities for select to authenticated using (actor_id=(select auth.uid()));
+create policy "activities_insert_own" on public.activities for insert to authenticated with check (actor_id=(select auth.uid()));
+
+grant select,insert,update,delete on public.profiles,public.companies,public.projects,public.project_extras,public.payments,public.activities to authenticated;
+
+-- PRIMER ADMINISTRADOR (Daniel, quien configura el sistema)
+-- IMPORTANTE: en este esquema el email de acceso de cada persona ES su email real de
+-- trabajo (ya no se usa un dominio interno inventado), porque así Supabase puede enviar
+-- correctamente el correo de "recuperar contraseña". El nombre de usuario (ej. daniel.perez)
+-- sigue siendo lo único que la persona escribe para entrar.
+--
+-- 1) En Authentication > Users crea manualmente a Daniel con su email real:
+--    daniel.perez@solidobusiness.com y una contraseña que él elija.
+-- 2) Convierte su perfil en administrador:
+-- update public.profiles set username='daniel.perez', full_name='Daniel Pérez', role='admin', job_title_en='Web Developer & Graphic Designer / Administrator', active=true where id=(select id from auth.users where email='daniel.perez@solidobusiness.com');
+-- 3) Inicia sesión como daniel.perez y, desde "Usuarios y permisos", crea a:
+--    - yini.puleo — Yini Puleo — permiso Administrator (con el email real de Yini)
+--    - alonso.rivera — Alonso Rivera — permiso Administrator (con el email real de Alonso)
+--    - fabiola.dominguez — Fabiola Dominguez — permiso Collaborator (con el email real de Fabiola)
+--    Esto llama a la Edge Function create-user, que crea cada cuenta con el email real
+--    y la contraseña temporal que le asignes a cada persona.
+-- Nota: Daniel queda como Administrador con acceso total y, a la vez, puede tener
+-- proyectos, extras y pagos asignados a su propio nombre como colaborador operativo.
