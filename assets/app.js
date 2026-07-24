@@ -285,14 +285,40 @@
     async markNotificationsRead(){
       const {error} = await supabaseClient.from("activities").update({read_at:new Date().toISOString()}).eq("actor_id",state.profile.id).is("read_at",null);
       if (error) throw error;
+    },
+    // Preferencias de notificación (encendido general + por categoría). Se guardan
+    // en profiles.notif_prefs y las lee la Edge Function antes de mandar cada push.
+    async updateNotifPrefs(prefs){
+      const {error} = await supabaseClient.from("profiles").update({notif_prefs:prefs}).eq("id",state.profile.id);
+      if (error) throw error;
+    },
+    // Suscripción push de este navegador/dispositivo (una fila por endpoint). Se
+    // usa "upsert" por endpoint para no duplicar si la persona activa de nuevo en
+    // el mismo dispositivo.
+    async saveSubscription(sub){
+      const {error} = await supabaseClient.from("push_subscriptions").upsert({
+        user_id: state.profile.id,
+        endpoint: sub.endpoint,
+        p256dh: sub.keys.p256dh,
+        auth: sub.keys.auth,
+        user_agent: navigator.userAgent
+      },{onConflict:"endpoint"});
+      if (error) throw error;
+    },
+    async deleteSubscription(endpoint){
+      const {error} = await supabaseClient.from("push_subscriptions").delete().eq("endpoint",endpoint);
+      if (error) throw error;
     }
   };
 
   const db = supabaseDb;
 
-  async function logActivity(action, forUserId) {
+  // category viaja a activities.category ("task"/"payment"/"project"/"general") y es lo
+  // que la Edge Function de notificaciones push revisa contra las preferencias de cada
+  // persona (profiles.notif_prefs) antes de mandarle el aviso a su celular o laptop.
+  async function logActivity(action, forUserId, category) {
     try {
-      await db.upsert("activities",{actor_id:forUserId||state.profile.id,action,created_by:state.profile.id});
+      await db.upsert("activities",{actor_id:forUserId||state.profile.id,action,created_by:state.profile.id,category:category||"general"});
     } catch (error) {
       console.warn("No se pudo registrar actividad",error);
     }
@@ -300,9 +326,9 @@
   // Alerta simple para otra persona (ej. "se te asignó esta tarea", "se registró tu pago").
   // Queda guardada como actividad de ESA persona; ella la ve en su propio panel
   // "Actividad reciente" al entrar (cada quien solo ve la suya, salvo administradores).
-  function notify(userId, message) {
+  function notify(userId, message, category) {
     if (!userId || userId === state.profile.id) return;
-    logActivity(message, userId);
+    logActivity(message, userId, category);
   }
 
   // ==========================================================================
@@ -381,14 +407,99 @@
     }
   }
 
-  function requestNotifPermission() {
+  // ==========================================================================
+  // Notificaciones push reales: llegan al celular o a la laptop aunque el
+  // navegador esté cerrado. Requieren un service worker (sw.js) + suscribirse
+  // con la clave pública VAPID + guardar esa suscripción en push_subscriptions.
+  // Un Database Webhook en Supabase avisa a una Edge Function cada vez que se
+  // crea una notificación nueva, y esa función es la que efectivamente envía
+  // el push (revisando antes las preferencias de la persona).
+  // ==========================================================================
+  let swRegistration = null;
+
+  function registerServiceWorker() {
+    if (!("serviceWorker" in navigator)) return Promise.resolve(null);
+    return navigator.serviceWorker.register("sw.js")
+      .then(reg => { swRegistration = reg; return reg; })
+      .catch(e => { console.warn("No se pudo registrar el service worker",e); return null; });
+  }
+
+  function urlBase64ToUint8Array(base64String) {
+    const padding = "=".repeat((4 - base64String.length % 4) % 4);
+    const base64 = (base64String + padding).replace(/-/g,"+").replace(/_/g,"/");
+    const raw = atob(base64);
+    return Uint8Array.from([...raw].map(c => c.charCodeAt(0)));
+  }
+
+  async function subscribeToPush() {
     if (!("Notification" in window)) { toast("Este navegador no admite notificaciones del sistema.","error"); return; }
-    Notification.requestPermission().then(() => renderNotifDropdownList());
+    const permission = await Notification.requestPermission();
+    renderNotifDropdownList();
+    if (permission !== "granted") return;
+    if (!("serviceWorker" in navigator) || !("PushManager" in window)) {
+      toast("Este navegador no admite notificaciones push, pero seguirás viendo avisos mientras la pestaña esté abierta.","error");
+      return;
+    }
+    if (!CONFIG.VAPID_PUBLIC_KEY) { console.warn("Falta VAPID_PUBLIC_KEY en config.js"); return; }
+    try {
+      const reg = swRegistration || await registerServiceWorker();
+      if (!reg) return;
+      await navigator.serviceWorker.ready;
+      let sub = await reg.pushManager.getSubscription();
+      if (!sub) {
+        sub = await reg.pushManager.subscribe({
+          userVisibleOnly: true,
+          applicationServerKey: urlBase64ToUint8Array(CONFIG.VAPID_PUBLIC_KEY)
+        });
+      }
+      await db.saveSubscription(sub.toJSON ? sub.toJSON() : sub);
+      toast("Notificaciones activadas en este dispositivo.","success");
+    } catch (e) {
+      console.warn("No se pudo activar el push en este dispositivo",e);
+      toast("No se pudieron activar las notificaciones push en este dispositivo.","error");
+    }
+  }
+
+  // Preferencias: encendido general + por categoría (tareas/pagos/proyectos).
+  // Se guardan en profiles.notif_prefs y la Edge Function las revisa antes de
+  // mandar cada push, así que alcanza con actualizarlas acá.
+  function currentNotifPrefs() {
+    return Object.assign({enabled:true,tasks:true,payments:true,projects:true}, state.profile?.notif_prefs || {});
+  }
+
+  function renderNotifPrefsPanel() {
+    const prefs = currentNotifPrefs();
+    const map = {notifPrefEnabled:"enabled",notifPrefTasks:"tasks",notifPrefPayments:"payments",notifPrefProjects:"projects"};
+    Object.entries(map).forEach(([id,key]) => { const el = $("#"+id); if (el) el.checked = !!prefs[key]; });
+  }
+
+  async function toggleNotifPrefsPanel() {
+    const panel = $("#notifPrefsPanel");
+    if (!panel) return;
+    const opening = panel.classList.contains("hidden");
+    if (opening) renderNotifPrefsPanel();
+    panel.classList.toggle("hidden", !opening);
+  }
+
+  async function handleNotifPrefChange() {
+    const prefs = {
+      enabled: !!$("#notifPrefEnabled")?.checked,
+      tasks: !!$("#notifPrefTasks")?.checked,
+      payments: !!$("#notifPrefPayments")?.checked,
+      projects: !!$("#notifPrefProjects")?.checked
+    };
+    state.profile.notif_prefs = prefs;
+    try { await db.updateNotifPrefs(prefs); }
+    catch(e) { console.warn("No se pudieron guardar las preferencias de notificación",e); toast("No se pudo guardar la preferencia.","error"); }
   }
 
   // Se dispara cuando llega una fila nueva a "activities" dirigida a esta persona
   // (Supabase Realtime). Actualiza el estado local, hace sonar la campana y, si
   // el permiso está concedido, muestra un aviso del sistema operativo.
+  //
+  // El "tag" comparte nombre con el que usa el service worker al mostrar el push
+  // de esta misma notificación (ver sw.js): si ambos caminos llegan casi a la vez
+  // con la pestaña abierta, el segundo reemplaza al primero en vez de duplicarse.
   function handleIncomingNotification(row) {
     if (!row || row.actor_id !== state.profile.id) return;
     if ((state.activities||[]).some(a => a.id===row.id)) return; // ya lo teníamos (evita duplicar por reconexión)
@@ -397,7 +508,7 @@
     if (!$("#notifDropdown")?.classList.contains("hidden")) renderNotifDropdownList();
     playNotifSound();
     if ("Notification" in window && Notification.permission === "granted") {
-      try { new Notification("Sólido Control", {body: row.action, icon: "assets/solido-logo.jpeg"}); } catch(e) { /* algunos navegadores requieren un service worker; se ignora si falla */ }
+      try { new Notification("Sólido Control", {body: row.action, icon: "assets/solido-logo.jpeg", tag:"solido-activity-"+row.id}); } catch(e) { /* algunos navegadores requieren un service worker; se ignora si falla */ }
     }
   }
 
@@ -463,7 +574,11 @@
       if (!event.target.closest(".notif-wrap")) $("#notifDropdown")?.classList.add("hidden");
     });
     $("#notifBellBtn").addEventListener("click",event => { event.stopPropagation(); toggleNotifDropdown(); });
-    $("#notifEnableBtn").addEventListener("click",requestNotifPermission);
+    $("#notifEnableBtn").addEventListener("click",subscribeToPush);
+    $("#notifPrefsBtn").addEventListener("click",event => { event.stopPropagation(); toggleNotifPrefsPanel(); });
+    ["notifPrefEnabled","notifPrefTasks","notifPrefPayments","notifPrefProjects"].forEach(id => {
+      $("#"+id)?.addEventListener("change",handleNotifPrefChange);
+    });
     $("#quickAddBtn").addEventListener("click",() => openModal("project"));
     $("#closeModalBtn").addEventListener("click",closeModal);
     $("#modalBackdrop").addEventListener("click",event => { if (event.target.id === "modalBackdrop") closeModal(); });
@@ -534,6 +649,7 @@
     showView("dashboard");
     refreshFxRate().then(() => renderCurrentView());
     initNotifications();
+    registerServiceWorker();
   }
 
   function showAuth(mode) {
@@ -978,7 +1094,7 @@
         btn.disabled=true;
         try{
           await db.createTask(projectId,title,assignedTo,instructions);
-          notify(assignedTo, `Se te asignó la tarea "${title}" en el proyecto "${project.title}".${instructions?" Tiene instrucciones, revísalas en la tarea.":""}`);
+          notify(assignedTo, `Se te asignó la tarea "${title}" en el proyecto "${project.title}".${instructions?" Tiene instrucciones, revísalas en la tarea.":""}`, "task");
           input.value=""; $("#newTaskInstructions").value=""; await renderTaskList(projectId);
         }
         catch(e){toast(e.message||"No se pudo agregar la tarea.","error");}
@@ -1017,7 +1133,7 @@
           box.disabled=true;
           try{
             await db.toggleTask(box.dataset.taskId,box.checked);
-            if(box.checked && project) notify(project.assigned_to, `Se completó la tarea "${box.dataset.taskTitle}" en el proyecto "${project.title}".`);
+            if(box.checked && project) notify(project.assigned_to, `Se completó la tarea "${box.dataset.taskTitle}" en el proyecto "${project.title}".`, "task");
             await renderTaskList(projectId);
           }
           catch(e){box.disabled=false;toast(e.message||"No se pudo actualizar la tarea.","error");}
@@ -1093,14 +1209,18 @@
       }
       if(type==="payment") {
         const amountLabel = formatMoney(form.amount, form.currency||"USD").replace(/<[^>]*>/g,"").trim();
-        if(!id) notify(form.collaborator_id, `Se registró un pago de ${amountLabel} para ti (${form.concept}).`);
+        if(!id) notify(form.collaborator_id, `Se registró un pago de ${amountLabel} para ti (${form.concept}).`, "payment");
         else {
           // Solo avisar cuando el estado recién pasa a "pagado" — comparamos contra el
           // valor previo (antes de este guardado) para no reenviar el aviso cada vez
           // que se edita cualquier otro campo de un pago que ya estaba pagado.
           const prevStatus = state.payments.find(pay=>pay.id===id)?.status;
-          if(form.status==="paid" && prevStatus!=="paid") notify(form.collaborator_id, `Tu pago de ${amountLabel} (${form.concept}) fue marcado como pagado.`);
+          if(form.status==="paid" && prevStatus!=="paid") notify(form.collaborator_id, `Tu pago de ${amountLabel} (${form.concept}) fue marcado como pagado.`, "payment");
         }
+      }
+      // Aviso de "proyecto nuevo" a quien quede asignado (si no es quien lo está creando).
+      if(type==="project" && !id && payload.assigned_to) {
+        notify(payload.assigned_to, `Se te asignó un nuevo proyecto: "${form.title}".`, "project");
       }
       await logActivity(`${id?"Actualizó":"Creó"} ${typeLabel(type)}${form.title?`: ${form.title}`:""}`);
       closeModal(); await refreshData(); renderCurrentView(); toast("Cambios guardados correctamente.");
@@ -1134,7 +1254,7 @@
         // tarea) que hubo movimiento, para que le llegue como notificación en su
         // propia campana en vez de tener que estar revisando manualmente.
         const projectOwner = task.projects?.assigned_to;
-        if (projectOwner) notify(projectOwner, `${state.profile.full_name} ${verb} la tarea "${task.title}"${projectTitle?` (${projectTitle})`:""}.`);
+        if (projectOwner) notify(projectOwner, `${state.profile.full_name} ${verb} la tarea "${task.title}"${projectTitle?` (${projectTitle})`:""}.`, "task");
         await refreshData();
         renderCurrentView();
         // Si la tarea se estaba viendo en el detalle (modal), lo refrescamos para que

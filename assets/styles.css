@@ -32,6 +32,13 @@
 .notif-dropdown{position:absolute;top:calc(100% + 10px);right:0;width:320px;max-height:420px;overflow:auto;background:#fff;border:1px solid var(--line);border-radius:16px;box-shadow:var(--shadow);z-index:40}.notif-dropdown.hidden{display:none}
 .notif-dropdown-head{display:flex;align-items:center;justify-content:space-between;gap:8px;padding:14px 16px;border-bottom:1px solid var(--line);position:sticky;top:0;background:#fff}
 .notif-list{padding:6px}.notif-item{padding:10px 12px;border-radius:10px}.notif-item.unread{background:#f0f7f2}.notif-item p{margin:0 0 4px;font-size:.85rem}.notif-item small{color:var(--muted);font-size:.72rem}
+.notif-head-actions{display:flex;align-items:center;gap:6px}
+.icon-button-sm{border:1px solid var(--line);background:#fff;border-radius:8px;width:26px;height:26px;display:flex;align-items:center;justify-content:center;cursor:pointer;font-size:.85rem;flex:0 0 auto}
+.icon-button-sm:hover{background:#f5f6f4}
+.notif-prefs-panel{padding:10px 16px 14px;border-bottom:1px solid var(--line);background:#fafaf9}.notif-prefs-panel.hidden{display:none}
+.notif-pref-row{display:flex;align-items:center;justify-content:space-between;gap:10px;padding:6px 0;font-size:.82rem}
+.notif-pref-master{font-weight:700;border-bottom:1px dashed var(--line);margin-bottom:2px;padding-bottom:8px}
+.notif-prefs-hint{margin:6px 0 0;font-size:.7rem;color:var(--muted);line-height:1.35}
 .task-instructions-block{background:#f8faf8;border:1px solid var(--line);border-radius:12px;padding:12px 14px;white-space:pre-wrap;font-size:.87rem;margin:0}
 .task-notes-list{display:grid;gap:8px;max-height:220px;overflow:auto;margin-bottom:10px}
 .task-note-item{background:#f8faf8;border:1px solid var(--line);border-radius:12px;padding:10px 12px}.task-note-item strong{font-size:.82rem}.task-note-item small{display:block;color:var(--muted);font-size:.7rem;margin-bottom:4px}.task-note-item p{margin:4px 0 0;font-size:.85rem;white-space:pre-wrap}
