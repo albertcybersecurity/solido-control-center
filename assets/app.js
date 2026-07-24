@@ -56,7 +56,7 @@
   const initials = name => String(name || "U").split(/\s+/).filter(Boolean).slice(0,2).map(x => x[0]).join("").toUpperCase();
   const formatDate = value => value ? new Intl.DateTimeFormat("es-AR", {day:"2-digit",month:"short",year:"numeric"}).format(new Date(`${value}T12:00:00`)) : "Sin fecha";
   const statusLabel = value => PROJECT_STATUSES.find(([key]) => key === value)?.[1] || value || "Sin estado";
-  const statusClass = value => ({completed:"completed",cancelled:"cancelled",pending_payment:"pending",pending_closure:"waiting",awaiting_client:"waiting",awaiting_approval:"waiting",not_started:"pending",paid:"paid",partial:"waiting",pending:"pending",active:"active"}[value] || "");
+  const statusClass = value => ({completed:"completed",cancelled:"cancelled",pending_payment:"pending",pending_closure:"waiting",awaiting_client:"waiting",awaiting_approval:"waiting",not_started:"pending",paid:"paid",partial:"partial",pending:"pending",active:"active"}[value] || "");
   // Cotización del dólar blue (mercado real/paralelo en Argentina, el tipo de cambio que
   // se acerca más a lo que de verdad se recibe con remesas como Remitly, muy distinto del
   // dólar oficial). Se actualiza sola cada pocos minutos mientras la app está abierta.
@@ -189,8 +189,8 @@
       if (error) throw error;
       return data || [];
     },
-    async createTask(projectId,title){
-      const {error} = await supabaseClient.from("tasks").insert({project_id:projectId,title,created_by:state.profile.id,assigned_to:state.profile.id});
+    async createTask(projectId,title,assignedTo){
+      const {error} = await supabaseClient.from("tasks").insert({project_id:projectId,title,created_by:state.profile.id,assigned_to:assignedTo||state.profile.id});
       if (error) throw error;
     },
     async toggleTask(id,done){
@@ -217,7 +217,7 @@
     $("#modeBadge").textContent = isSupabaseConfigured ? "Base de datos privada" : "Pendiente de conexión";
     bindEvents();
     refreshFxRate().then(() => { if (state.profile) renderCurrentView(); });
-    setInterval(() => refreshFxRate().then(() => { if (state.profile) renderCurrentView(); }), 10 * 60 * 1000);
+    setInterval(() => refreshFxRate().then(() => { if (state.profile) renderCurrentView(); }), 5 * 60 * 1000);
     if (!isSupabaseConfigured) {
       const notice = $("#setupNotice");
       notice.classList.remove("hidden");
@@ -326,6 +326,7 @@
     applyPermissions();
     updateUserUI();
     showView("dashboard");
+    refreshFxRate().then(() => renderCurrentView());
   }
 
   function showAuth(mode) {
@@ -435,7 +436,7 @@
       ["→","Mis pagos pendientes",collaboratorPending,"Privado"],
       ["✓","Proyectos completados",state.projects.filter(p=>p.status==="completed").length,"Finalizados"]
     ];
-    $("#statsGrid").innerHTML = stats.map(([icon,label,value,trend])=>`<article class="stat-card"><div class="stat-top"><span>${esc(label)}</span><div class="stat-icon">${icon}</div></div><strong>${esc(value)}</strong><span class="stat-trend">${esc(trend)}</span></article>`).join("");
+    $("#statsGrid").innerHTML = stats.map(([icon,label,value,trend])=>`<article class="stat-card"><div class="stat-top"><span>${esc(label)}</span><div class="stat-icon">${icon}</div></div><strong>${value}</strong><span class="stat-trend">${esc(trend)}</span></article>`).join("");
 
     const counts = Object.fromEntries(PROJECT_STATUSES.map(([key])=>[key,state.projects.filter(p=>p.status===key).length]));
     const max = Math.max(1,...Object.values(counts));
@@ -561,10 +562,13 @@
     $("#modalKicker").textContent="Tareas del proyecto";
     $("#modalTitle").textContent=project.title;
     $("#modalForm").onsubmit=event=>event.preventDefault();
+    const taskSuggestions = ["Diseño web","Logotipo","Tarjetas de presentación","Manejo de redes sociales","Contenido para redes","Diseño de flyer","Edición de video","Fotografía","Mantenimiento web","Hosting y dominio","SEO básico","Cotización","Entrega final"];
     $("#modalForm").innerHTML=`
       <div class="task-list field-full" id="taskList"><p class="muted">Cargando tareas…</p></div>
       <div class="task-add-row field-full">
-        <input type="text" id="newTaskTitle" placeholder="Nueva tarea…">
+        <input type="text" id="newTaskTitle" list="taskSuggestions" placeholder="Nueva tarea… (elige o escribe)">
+        <datalist id="taskSuggestions">${taskSuggestions.map(t=>`<option value="${esc(t)}">`).join("")}</datalist>
+        <select id="newTaskAssignee">${optionList(state.users.filter(u=>u.active),"id","full_name",project.assigned_to)}</select>
         <button type="button" id="addTaskBtn" class="btn primary">Agregar</button>
       </div>
       <div class="modal-actions"><button type="button" class="btn outline" onclick="document.getElementById('closeModalBtn').click()">Cerrar</button></div>`;
@@ -572,8 +576,9 @@
     $("#addTaskBtn").addEventListener("click",async()=>{
       const input=$("#newTaskTitle");
       const title=input.value.trim();
+      const assignedTo=$("#newTaskAssignee").value;
       if(!title)return;
-      try{ await db.createTask(projectId,title); input.value=""; await renderTaskList(projectId); }
+      try{ await db.createTask(projectId,title,assignedTo); input.value=""; await renderTaskList(projectId); }
       catch(e){toast(e.message||"No se pudo agregar la tarea.","error");}
     });
     $("#newTaskTitle").addEventListener("keydown",event=>{
@@ -589,7 +594,7 @@
       const tasks=await db.loadTasks(projectId);
       container.innerHTML = tasks.length ? tasks.map(t=>`
         <div class="task-item ${t.done?"done":""}">
-          <label class="task-check"><input type="checkbox" data-task-id="${t.id}" ${t.done?"checked":""}><span>${esc(t.title)}</span></label>
+          <label class="task-check"><input type="checkbox" data-task-id="${t.id}" ${t.done?"checked":""}><span>${esc(t.title)}<small class="task-assignee">👤 ${esc(userName(t.assigned_to))}</small></span></label>
           <button type="button" class="icon-button" data-task-delete="${t.id}" aria-label="Eliminar tarea">×</button>
         </div>`).join("") : `<p class="muted">Todavía no hay tareas para este proyecto.</p>`;
       $$("input[data-task-id]",container).forEach(input=>input.addEventListener("change",async()=>{
