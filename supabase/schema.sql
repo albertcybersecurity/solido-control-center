@@ -410,3 +410,28 @@ alter table public.payments add column if not exists paid_amount numeric(14,2) n
 -- que se abonó el monto completo (si no, quedarían con paid_amount=0 mostrando
 -- "Pendiente: monto completo" para un pago que en realidad ya estaba saldado).
 update public.payments set paid_amount = amount where status = 'paid' and paid_amount = 0;
+
+-- ============================================================================
+-- AGREGADO: estado de tarea con tres pasos (pendiente / en progreso / completada)
+-- en vez del simple casillero "hecho / no hecho". Esto permite que cada quien
+-- pueda "iniciar" una tarea (queda "en progreso") y luego marcarla "terminada"
+-- (queda "completada"), y que cada cambio quede registrado en el historial de
+-- actividad ("Fabiola inició la tarea...", "Fabiola completó la tarea...").
+-- ============================================================================
+
+alter table public.tasks
+  add column if not exists status text not null default 'pending'
+  check (status in ('pending','in_progress','completed'));
+
+-- Las tareas que ya estaban marcadas "hecho" (done = true) antes de este cambio
+-- pasan a "completed"; el resto queda en "pending" (valor por defecto de la columna).
+update public.tasks set status = 'completed' where done = true and status = 'pending';
+
+create index if not exists idx_tasks_status on public.tasks(status);
+
+-- ============================================================================
+-- AGREGADO: campo de instrucciones/pasos para cada tarea, que llena quien la
+-- asigna (normalmente el administrador) para que quien la ejecuta sepa qué hacer.
+-- ============================================================================
+
+alter table public.tasks add column if not exists instructions text;
