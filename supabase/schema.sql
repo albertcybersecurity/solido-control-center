@@ -170,3 +170,67 @@ grant select,insert,update,delete on public.profiles,public.companies,public.pro
 --    y la contraseña temporal que le asignes a cada persona.
 -- Nota: Daniel queda como Administrador con acceso total y, a la vez, puede tener
 -- proyectos, extras y pagos asignados a su propio nombre como colaborador operativo.
+
+-- ============================================================================
+-- AGREGADO: comprobantes de pago (archivo adjunto) y tareas por proyecto
+-- ============================================================================
+
+alter table public.payments add column if not exists receipt_path text;
+alter table public.payments add column if not exists receipt_name text;
+
+create table if not exists public.tasks (
+  id uuid primary key default gen_random_uuid(),
+  project_id uuid not null references public.projects(id) on delete cascade,
+  title text not null,
+  done boolean not null default false,
+  assigned_to uuid references public.profiles(id),
+  created_by uuid references public.profiles(id),
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now()
+);
+create index if not exists idx_tasks_project_id on public.tasks(project_id);
+create index if not exists idx_tasks_assigned_to on public.tasks(assigned_to);
+
+alter table public.tasks enable row level security;
+
+drop policy if exists "tasks_admin_all" on public.tasks;
+create policy "tasks_admin_all" on public.tasks for all to authenticated using ((select private.is_admin())) with check ((select private.is_admin()));
+
+drop policy if exists "tasks_collaborator_all_own" on public.tasks;
+create policy "tasks_collaborator_all_own" on public.tasks for all to authenticated using (
+  assigned_to=(select auth.uid()) or exists(select 1 from public.projects p where p.id=tasks.project_id and p.assigned_to=(select auth.uid()))
+) with check (
+  assigned_to=(select auth.uid()) or exists(select 1 from public.projects p where p.id=tasks.project_id and p.assigned_to=(select auth.uid()))
+);
+
+grant select,insert,update,delete on public.tasks to authenticated;
+
+-- Almacenamiento privado de comprobantes de pago (Supabase Storage).
+-- Cada archivo se guarda con la ruta "<id_del_pago>/<archivo>"; solo el colaborador
+-- dueño de ese pago o un administrador pueden subirlo, verlo o borrarlo.
+insert into storage.buckets (id, name, public)
+values ('attachments','attachments', false)
+on conflict (id) do nothing;
+
+drop policy if exists "attachments_select" on storage.objects;
+create policy "attachments_select" on storage.objects for select to authenticated using (
+  bucket_id = 'attachments' and exists (
+    select 1 from public.payments pay
+    where pay.id::text = (storage.foldername(name))[1]
+    and (pay.collaborator_id = (select auth.uid()) or (select private.is_admin()))
+  )
+);
+
+drop policy if exists "attachments_insert" on storage.objects;
+create policy "attachments_insert" on storage.objects for insert to authenticated with check (
+  bucket_id = 'attachments' and exists (
+    select 1 from public.payments pay
+    where pay.id::text = (storage.foldername(name))[1]
+    and (pay.collaborator_id = (select auth.uid()) or (select private.is_admin()))
+  )
+);
+
+drop policy if exists "attachments_delete" on storage.objects;
+create policy "attachments_delete" on storage.objects for delete to authenticated using (
+  bucket_id = 'attachments' and (select private.is_admin())
+);
