@@ -615,6 +615,10 @@
       formData.delete("receipt_file");
       const form=Object.fromEntries(formData.entries());
       ["quoted_amount","client_paid","amount","client_price","collaborator_amount"].forEach(k=>{if(k in form)form[k]=Number(form[k]||0)});
+      // Los campos de fecha y las referencias opcionales (ej. "Sin proyecto") llegan como
+      // cadena vacía "" desde el formulario, pero Postgres rechaza "" para columnas date/uuid.
+      // Los convertimos a null para que se guarden correctamente como "sin valor".
+      ["start_date","due_date","paid_date","extra_date","project_id"].forEach(k=>{if(k in form && form[k]==="")form[k]=null;});
       if("billable_to_client" in form)form.billable_to_client=form.billable_to_client==="true";
       if("active" in form)form.active=form.active==="true";
       let savedId=id;
