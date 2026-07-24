@@ -149,7 +149,15 @@
         const {data,error} = await supabaseClient.from("profiles").select("*").order("created_at",{ascending:true});
         if (error) throw error;
         users = data || [];
-      } else users = [state.profile];
+      } else {
+        // Un colaborador solo puede leer su propio perfil completo (RLS), pero ahora
+        // puede ver proyectos/tareas de otras personas (ver más arriba). Sin nombres
+        // de los demás, esos casos mostrarían "Sin asignar" y no podría elegir a un
+        // compañero al asignar una tarea. directory_names() solo expone id+nombre.
+        const {data:directory} = await supabaseClient.rpc("directory_names");
+        const others = (directory || []).filter(d => d.id !== state.profile.id).map(d => ({id:d.id, full_name:d.full_name, active:true}));
+        users = [state.profile, ...others];
+      }
       return {companies:results[0],projects:results[1],extras:results[2],payments:results[3],activities:results[4],users};
     },
     async upsert(table,record,recordId=null){
@@ -696,7 +704,13 @@
       if(type==="payment") {
         const amountLabel = formatMoney(form.amount, form.currency||"USD").replace(/<[^>]*>/g,"").trim();
         if(!id) notify(form.collaborator_id, `Se registró un pago de ${amountLabel} para ti (${form.concept}).`);
-        else if(form.status==="paid") notify(form.collaborator_id, `Tu pago de ${amountLabel} (${form.concept}) fue marcado como pagado.`);
+        else {
+          // Solo avisar cuando el estado recién pasa a "pagado" — comparamos contra el
+          // valor previo (antes de este guardado) para no reenviar el aviso cada vez
+          // que se edita cualquier otro campo de un pago que ya estaba pagado.
+          const prevStatus = state.payments.find(pay=>pay.id===id)?.status;
+          if(form.status==="paid" && prevStatus!=="paid") notify(form.collaborator_id, `Tu pago de ${amountLabel} (${form.concept}) fue marcado como pagado.`);
+        }
       }
       await logActivity(`${id?"Actualizó":"Creó"} ${typeLabel(type)}${form.title?`: ${form.title}`:""}`);
       closeModal(); await refreshData(); renderCurrentView(); toast("Cambios guardados correctamente.");
