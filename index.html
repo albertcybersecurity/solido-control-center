@@ -6,7 +6,7 @@
   <meta name="theme-color" content="#063f2a" />
   <title>Sólido Control Center</title>
   <meta name="description" content="Panel privado para controlar empresas, proyectos, extras y pagos de Sólido Business Group." />
-  <link rel="stylesheet" href="assets/styles.css?v=20260724i" />
+  <link rel="stylesheet" href="assets/styles.css?v=20260724j" />
 </head>
 <body>
   <div id="toastStack" class="toast-stack" aria-live="polite"></div>
@@ -97,6 +97,7 @@
 
       <nav class="nav-list" id="mainNav">
         <button class="nav-item active" data-view="dashboard"><span>▦</span> Dashboard</button>
+        <button class="nav-item" data-view="tasks"><span>✓</span> Tareas pendientes <span class="nav-badge hidden" id="tasksNavBadge">0</span></button>
         <button class="nav-item" data-view="companies"><span>▣</span> Empresas</button>
         <button class="nav-item" data-view="projects"><span>◆</span> Proyectos</button>
         <button class="nav-item" data-view="extras"><span>＋</span> Extras</button>
@@ -120,6 +121,18 @@
         </div>
         <div class="top-actions">
           <button id="quickAddBtn" class="btn outline admin-only">＋ Nuevo</button>
+          <div class="notif-wrap">
+            <button id="notifBellBtn" class="icon-button notif-bell" aria-label="Notificaciones" type="button">
+              🔔<span class="notif-badge hidden" id="notifBadge">0</span>
+            </button>
+            <div id="notifDropdown" class="notif-dropdown hidden">
+              <div class="notif-dropdown-head">
+                <strong>Notificaciones</strong>
+                <button id="notifEnableBtn" class="text-action hidden" type="button">Activar avisos en este dispositivo</button>
+              </div>
+              <div id="notifList" class="notif-list"></div>
+            </div>
+          </div>
           <button id="userMenuBtn" class="user-chip">
             <span class="avatar" id="headerAvatar">YP</span>
             <span class="user-chip-copy">
@@ -208,6 +221,13 @@
               <div id="deadlinesList" class="mini-list"></div>
             </article>
           </div>
+        </section>
+
+        <section id="view-tasks" class="view">
+          <div class="section-head">
+            <div><span class="eyebrow">Work queue</span><h2>Tareas pendientes</h2><p>Tus tareas asignadas en cualquier proyecto. Abrí una para ver las instrucciones, iniciarla, ir anotando tu avance y marcarla como completada.</p></div>
+          </div>
+          <div id="tasksFullList" class="task-list"></div>
         </section>
 
         <section id="view-companies" class="view">
@@ -317,6 +337,6 @@
   </div>
 
   <script src="assets/config.js?v=20260724d"></script>
-  <script src="assets/app.js?v=20260724l"></script>
+  <script src="assets/app.js?v=20260724m"></script>
 </body>
 </html>
