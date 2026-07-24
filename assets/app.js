@@ -685,7 +685,7 @@
     $("#modalKicker").textContent="Tareas del proyecto";
     $("#modalTitle").textContent=project.title;
     $("#modalForm").onsubmit=event=>event.preventDefault();
-    const taskSuggestions = ["Diseño web","Logotipo","Tarjetas de presentación","Manejo de redes sociales","Contenido para redes","Diseño de flyer","Edición de video","Fotografía","Mantenimiento web","Hosting y dominio","SEO básico","Cotización","Entrega final"];
+    const taskSuggestions = ["Paquete Full Diseño Web","Diseño web","Logotipo","Tarjetas de presentación","Manejo de redes sociales","Contenido para redes","Diseño de flyer","Edición de video","Fotografía","Mantenimiento web","Hosting y dominio","SEO básico","Cotización","Entrega final"];
     const addRow = isViewer() ? "" : `
       <div class="task-add-row field-full">
         <input type="text" id="newTaskTitle" list="taskSuggestions" placeholder="Nueva tarea… (elige o escribe)">
@@ -836,7 +836,15 @@
     if(action.startsWith("edit-")){openModal(action.replace("edit-",""),id);return;}
     if(action==="view-tasks"){openTasksModal(id);return;}
     if(action==="start-task"||action==="complete-task"){
+      // Guard contra doble clic/doble toque: en celular es fácil tocar dos veces
+      // seguidas antes de que el botón cambie de texto, y como el segundo toque cae
+      // en el mismo lugar donde ya apareció "Tarea terminada", la tarea se iniciaba
+      // Y se completaba de una sola vez. Deshabilitamos el botón apenas se toca una
+      // vez, así el segundo toque (mientras el primero todavía está guardando) no
+      // hace nada.
+      if(button.disabled)return;
       const task=(state.myTasks||[]).find(t=>t.id===id); if(!task)return;
+      button.disabled=true;
       const newStatus = action==="start-task" ? "in_progress" : "completed";
       try{
         await db.setTaskStatus(id,newStatus);
@@ -846,7 +854,7 @@
         await refreshData();
         renderCurrentView();
         toast(newStatus==="in_progress" ? "Tarea iniciada." : "¡Tarea completada!");
-      }catch(e){toast(e.message||"No se pudo actualizar la tarea.","error");}
+      }catch(e){button.disabled=false;toast(e.message||"No se pudo actualizar la tarea.","error");}
       return;
     }
     if(action==="view-receipt"){
