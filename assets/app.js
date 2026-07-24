@@ -35,6 +35,16 @@
   ];
   const CURRENCIES = ["USD", "ARS"];
   const PAYMENT_METHODS = ["Transferencia bancaria", "Efectivo", "PayPal", "Zelle", "Wise", "Otro"];
+  // Ciclo de vida de una tarea: pendiente → en progreso (la persona le dio "Iniciar
+  // tarea") → completada (le dio "Tarea terminada"). Cada cambio se registra en el
+  // historial de actividad (ver updateMyTaskStatus más abajo).
+  const TASK_STATUS_META = {
+    pending: {label:"Pendiente", chip:"pending"},
+    in_progress: {label:"En progreso", chip:"waiting"},
+    completed: {label:"Completada", chip:"completed"}
+  };
+  const taskStatusLabel = value => TASK_STATUS_META[value]?.label || "Pendiente";
+  const taskStatusChip = value => TASK_STATUS_META[value]?.chip || "pending";
 
   const state = {
     user: null,
@@ -45,6 +55,7 @@
     payments: [],
     users: [],
     activities: [],
+    myTasks: [],
     currentView: "dashboard",
     modal: null
   };
@@ -181,7 +192,17 @@
         const others = (directory || []).filter(d => d.id !== state.profile.id).map(d => ({id:d.id, full_name:d.full_name, active:true}));
         users = [state.profile, ...others];
       }
-      return {companies,projects,extras,payments,activities,users};
+      // Panel "Tareas pendientes" del Dashboard: tareas de CUALQUIER proyecto que me
+      // fueron asignadas a mí, con el nombre del proyecto y de la empresa ya incluidos
+      // (se resuelven con el join automático de PostgREST vía las foreign keys).
+      const {data:myTasksData,error:myTasksError} = await supabaseClient
+        .from("tasks")
+        .select("*, projects(title, companies(name))")
+        .eq("assigned_to", state.profile.id)
+        .order("created_at",{ascending:true});
+      if (myTasksError) throw myTasksError;
+      const myTasks = myTasksData || [];
+      return {companies,projects,extras,payments,activities,users,myTasks};
     },
     async upsert(table,record,recordId=null){
       const realTable = table === "extras" ? "project_extras" : table;
@@ -225,7 +246,14 @@
       if (error) throw error;
     },
     async toggleTask(id,done){
-      const {error} = await supabaseClient.from("tasks").update({done,updated_at:new Date().toISOString()}).eq("id",id);
+      // El casillero de la lista de tareas (dentro de cada proyecto) sigue siendo
+      // binario, pero ahora también mantiene sincronizado el nuevo estado de 3 pasos:
+      // marcarla hace done=true/status="completed", desmarcarla la vuelve a "pending".
+      const {error} = await supabaseClient.from("tasks").update({done,status:done?"completed":"pending",updated_at:new Date().toISOString()}).eq("id",id);
+      if (error) throw error;
+    },
+    async setTaskStatus(id,status){
+      const {error} = await supabaseClient.from("tasks").update({status,done:status==="completed",updated_at:new Date().toISOString()}).eq("id",id);
       if (error) throw error;
     },
     async deleteTask(id){
@@ -384,6 +412,7 @@
     state.payments = data.payments || [];
     state.users = data.users || [];
     state.activities = data.activities || [];
+    state.myTasks = data.myTasks || [];
     populateFilters();
   }
 
@@ -505,13 +534,43 @@
     }
 
     const pending = state.payments.filter(p=>p.status!=="paid").sort((a,b)=>(a.due_date||"9999").localeCompare(b.due_date||"9999")).slice(0,5);
-    $("#pendingPaymentsList").innerHTML = pending.length ? pending.map(p=>`<div class="mini-item"><div class="mini-icon">$</div><div><strong>${esc(p.concept)}</strong><small>${isViewer()?"Monto oculto":formatMoney(p.amount,p.currency)} · ${formatDate(p.due_date)}</small></div></div>`).join("") : empty("No hay pagos pendientes");
+    $("#pendingPaymentsList").innerHTML = pending.length ? pending.map(p=>{
+      const owed = Math.max(0, Number(p.amount||0)-Number(p.paid_amount||0));
+      return `<div class="mini-item"><div class="mini-icon">$</div><div><strong>${esc(p.concept)}</strong><small>${isViewer()?"Monto oculto":formatMoney(owed,p.currency)} · ${formatDate(p.due_date)}</small></div></div>`;
+    }).join("") : empty("No hay pagos pendientes");
 
     const activities = state.activities.slice(0,6);
     $("#activityList").innerHTML = activities.length ? activities.map(a=>`<div class="activity-item"><div class="mini-icon">↗</div><div><strong>${esc(a.action)}</strong><small>${new Date(a.created_at).toLocaleString("es-AR")}</small></div></div>`).join("") : empty("Todavía no hay actividad");
 
     const deadlines = state.projects.filter(p=>p.due_date && !["completed","cancelled"].includes(p.status)).sort((a,b)=>a.due_date.localeCompare(b.due_date)).slice(0,5);
     $("#deadlinesList").innerHTML = deadlines.length ? deadlines.map(p=>`<div class="mini-item"><div class="mini-icon">◷</div><div><strong>${esc(p.title)}</strong><small>${formatDate(p.due_date)} · ${statusLabel(p.status)}</small></div></div>`).join("") : empty("No hay vencimientos próximos");
+
+    renderMyTasks();
+  }
+
+  // Panel "Tareas pendientes" del Dashboard: muestra las tareas asignadas a la
+  // persona que inició sesión (de cualquier proyecto/empresa), con un botón para
+  // avanzar el estado: Pendiente → (Iniciar tarea) → En progreso → (Tarea
+  // terminada) → Completada. Cada paso queda registrado en "Actividad reciente".
+  function renderMyTasks() {
+    const list = $("#myTasksList");
+    if (!list) return;
+    const rows = (state.myTasks||[]).filter(t=>t.status!=="completed").sort((a,b)=>{
+      const order = {in_progress:0,pending:1};
+      return (order[a.status]??1)-(order[b.status]??1) || (a.created_at||"").localeCompare(b.created_at||"");
+    });
+    list.innerHTML = rows.length ? rows.map(t=>{
+      const projectTitle = t.projects?.title || "Sin proyecto";
+      const companyName = t.projects?.companies?.name || "Sin empresa";
+      const actionBtn = isViewer() ? "" : t.status==="pending"
+        ? `<button class="btn outline" data-action="start-task" data-id="${t.id}">Iniciar tarea</button>`
+        : `<button class="btn primary" data-action="complete-task" data-id="${t.id}">Tarea terminada</button>`;
+      return `<div class="task-item">
+        <span class="task-check" style="cursor:default"><span>${esc(t.title)}<small class="task-assignee">🏢 ${esc(companyName)} · ${esc(projectTitle)}</small></span></span>
+        <span class="status-chip ${taskStatusChip(t.status)}">${taskStatusLabel(t.status)}</span>
+        ${actionBtn}
+      </div>`;
+    }).join("") : empty("No tienes tareas pendientes");
   }
 
   function renderCompanies() {
@@ -667,7 +726,7 @@
       const tasks=await db.loadTasks(projectId);
       container.innerHTML = tasks.length ? tasks.map(t=>`
         <div class="task-item ${t.done?"done":""}">
-          <label class="task-check"><input type="checkbox" data-task-id="${t.id}" data-task-title="${esc(t.title)}" ${t.done?"checked":""} ${isViewer()?"disabled":""}><span>${esc(t.title)}<small class="task-assignee">👤 ${esc(userName(t.assigned_to))}</small></span></label>
+          <label class="task-check"><input type="checkbox" data-task-id="${t.id}" data-task-title="${esc(t.title)}" ${t.done?"checked":""} ${isViewer()?"disabled":""}><span>${esc(t.title)}<small class="task-assignee">👤 ${esc(userName(t.assigned_to))} · <span class="status-chip ${taskStatusChip(t.status)}">${taskStatusLabel(t.status)}</span></small></span></label>
           ${isViewer()?"":`<button type="button" class="icon-button" data-task-delete="${t.id}" aria-label="Eliminar tarea">×</button>`}
         </div>`).join("") : `<p class="muted">Todavía no hay tareas para este proyecto.</p>`;
       if (!isViewer()) {
@@ -770,6 +829,20 @@
     const {action,id}=button.dataset;
     if(action.startsWith("edit-")){openModal(action.replace("edit-",""),id);return;}
     if(action==="view-tasks"){openTasksModal(id);return;}
+    if(action==="start-task"||action==="complete-task"){
+      const task=(state.myTasks||[]).find(t=>t.id===id); if(!task)return;
+      const newStatus = action==="start-task" ? "in_progress" : "completed";
+      try{
+        await db.setTaskStatus(id,newStatus);
+        const verb = newStatus==="in_progress" ? "inició" : "completó";
+        const projectTitle = task.projects?.title || "";
+        await logActivity(`${state.profile.full_name} ${verb} la tarea "${task.title}"${projectTitle?` (${projectTitle})`:""}`);
+        await refreshData();
+        renderCurrentView();
+        toast(newStatus==="in_progress" ? "Tarea iniciada." : "¡Tarea completada!");
+      }catch(e){toast(e.message||"No se pudo actualizar la tarea.","error");}
+      return;
+    }
     if(action==="view-receipt"){
       const payment=state.payments.find(p=>p.id===id);
       if(!payment?.receipt_path){toast("Este pago no tiene comprobante adjunto.","error");return;}
