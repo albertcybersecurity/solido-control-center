@@ -205,12 +205,19 @@
 
   const db = supabaseDb;
 
-  async function logActivity(action) {
+  async function logActivity(action, forUserId) {
     try {
-      await db.upsert("activities",{actor_id:state.profile.id,action,created_by:state.profile.id});
+      await db.upsert("activities",{actor_id:forUserId||state.profile.id,action,created_by:state.profile.id});
     } catch (error) {
       console.warn("No se pudo registrar actividad",error);
     }
+  }
+  // Alerta simple para otra persona (ej. "se te asignó esta tarea", "se registró tu pago").
+  // Queda guardada como actividad de ESA persona; ella la ve en su propio panel
+  // "Actividad reciente" al entrar (cada quien solo ve la suya, salvo administradores).
+  function notify(userId, message) {
+    if (!userId || userId === state.profile.id) return;
+    logActivity(message, userId);
   }
 
   async function initialize() {
@@ -401,6 +408,13 @@
     const extrasTotal = state.extras.filter(e=>e.project_id===p.id && e.billable_to_client).reduce((sum,e)=>sum+Number(e.client_price||0),0);
     return Number(p.quoted_amount||0) + extrasTotal;
   }
+  // Lo acordado con el cliente (arriba) y lo acordado con el colaborador (aquí) son dos
+  // cosas distintas: cuánto se le cobra al cliente por el proyecto vs. cuánto se le paga
+  // al colaborador que lo hace. Esto calcula, para el colaborador, cuánto ya se le pagó
+  // (pagos con estado "Pagado" ligados a este proyecto) y cuánto le faltaría cobrar.
+  function projectCollaboratorPaid(p) {
+    return state.payments.filter(pay=>pay.project_id===p.id && pay.status==="paid").reduce((sum,pay)=>sum+Number(pay.amount||0),0);
+  }
 
   function renderDashboard() {
     const visibleProjects = state.projects;
@@ -486,8 +500,13 @@
     });
     $("#projectsTable").innerHTML = rows.length ? rows.map(p=>{
       const total=projectTotalAmount(p);
-      return `<tr><td class="row-title"><strong>${esc(p.title)}</strong><small>${esc(p.work_type||"")}</small></td><td>${esc(companyName(p.company_id))}</td><td>${esc(userName(p.assigned_to))}</td><td><span class="status-chip ${statusClass(p.status)}">${statusLabel(p.status)}</span></td><td>${isAdmin()?`${formatMoney(total,p.currency)}<br><small class="muted">Pagado: ${formatMoney(p.client_paid,p.currency)}</small>`:'<span class="status-chip">Información administrativa</span>'}</td><td>${formatDate(p.due_date)}</td><td><button class="btn outline" data-action="view-tasks" data-id="${p.id}">Tareas</button> ${isAdmin()?`<button class="btn outline" data-action="edit-project" data-id="${p.id}">Editar</button> <button class="btn danger" data-action="delete-project" data-id="${p.id}">Eliminar</button>`:""}</td></tr>`;
-    }).join("") : `<tr><td colspan="7">${empty("No se encontraron proyectos")}</td></tr>`;
+      const collabBudget=Number(p.collaborator_budget||0);
+      const collabPaid=projectCollaboratorPaid(p);
+      const collabPending=Math.max(0,collabBudget-collabPaid);
+      const canSeeCollabPay = isAdmin() || p.assigned_to===state.profile.id;
+      const collabCell = canSeeCollabPay ? `Acordado: ${formatMoney(collabBudget,p.currency)}<br><small class="muted">Pagado: ${formatMoney(collabPaid,p.currency)}</small><br><small class="${collabPending>0?'danger-text':'muted'}">${collabPending>0?`Falta: ${formatMoney(collabPending,p.currency)}`:"Al día"}</small>` : '<span class="status-chip">Información administrativa</span>';
+      return `<tr><td class="row-title"><strong>${esc(p.title)}</strong><small>${esc(p.work_type||"")}</small></td><td>${esc(companyName(p.company_id))}</td><td>${esc(userName(p.assigned_to))}</td><td><span class="status-chip ${statusClass(p.status)}">${statusLabel(p.status)}</span></td><td>${isAdmin()?`${formatMoney(total,p.currency)}<br><small class="muted">Cobrado: ${formatMoney(p.client_paid,p.currency)}</small>`:'<span class="status-chip">Información administrativa</span>'}</td><td>${collabCell}</td><td>${formatDate(p.due_date)}</td><td><button class="btn outline" data-action="view-tasks" data-id="${p.id}">Tareas</button> ${isAdmin()?`<button class="btn outline" data-action="edit-project" data-id="${p.id}">Editar</button> <button class="btn danger" data-action="delete-project" data-id="${p.id}">Eliminar</button>`:""}</td></tr>`;
+    }).join("") : `<tr><td colspan="8">${empty("No se encontraron proyectos")}</td></tr>`;
   }
 
   function renderExtras() {
@@ -578,7 +597,11 @@
       const title=input.value.trim();
       const assignedTo=$("#newTaskAssignee").value;
       if(!title)return;
-      try{ await db.createTask(projectId,title,assignedTo); input.value=""; await renderTaskList(projectId); }
+      try{
+        await db.createTask(projectId,title,assignedTo);
+        notify(assignedTo, `Se te asignó la tarea "${title}" en el proyecto "${project.title}".`);
+        input.value=""; await renderTaskList(projectId);
+      }
       catch(e){toast(e.message||"No se pudo agregar la tarea.","error");}
     });
     $("#newTaskTitle").addEventListener("keydown",event=>{
@@ -590,15 +613,20 @@
   async function renderTaskList(projectId) {
     const container=$("#taskList");
     if(!container)return;
+    const project = state.projects.find(p=>p.id===projectId);
     try {
       const tasks=await db.loadTasks(projectId);
       container.innerHTML = tasks.length ? tasks.map(t=>`
         <div class="task-item ${t.done?"done":""}">
-          <label class="task-check"><input type="checkbox" data-task-id="${t.id}" ${t.done?"checked":""}><span>${esc(t.title)}<small class="task-assignee">👤 ${esc(userName(t.assigned_to))}</small></span></label>
+          <label class="task-check"><input type="checkbox" data-task-id="${t.id}" data-task-title="${esc(t.title)}" ${t.done?"checked":""}><span>${esc(t.title)}<small class="task-assignee">👤 ${esc(userName(t.assigned_to))}</small></span></label>
           <button type="button" class="icon-button" data-task-delete="${t.id}" aria-label="Eliminar tarea">×</button>
         </div>`).join("") : `<p class="muted">Todavía no hay tareas para este proyecto.</p>`;
       $$("input[data-task-id]",container).forEach(input=>input.addEventListener("change",async()=>{
-        try{ await db.toggleTask(input.dataset.taskId,input.checked); await renderTaskList(projectId); }
+        try{
+          await db.toggleTask(input.dataset.taskId,input.checked);
+          if(input.checked && project) notify(project.assigned_to, `Se completó la tarea "${input.dataset.taskTitle}" en el proyecto "${project.title}".`);
+          await renderTaskList(projectId);
+        }
         catch(e){toast(e.message||"No se pudo actualizar la tarea.","error");}
       }));
       $$("[data-task-delete]",container).forEach(btn=>btn.addEventListener("click",async()=>{
@@ -625,7 +653,7 @@
     r=r||{};
     const save=`<div class="modal-actions"><button type="button" class="btn outline" onclick="document.getElementById('closeModalBtn').click()">Cancelar</button><button type="submit" class="btn primary">Guardar</button></div>`;
     if(type==="company")return{title:r.id?"Editar empresa":"Agregar empresa",html:`<label>Empresa<input name="name" required value="${esc(r.name||"")}"></label><label>Persona de contacto<input name="contact_name" value="${esc(r.contact_name||"")}"></label><label>Correo<input name="email" type="email" value="${esc(r.email||"")}"></label><label>Teléfono<input name="phone" value="${esc(r.phone||"")}"></label><label class="field-full">Dirección<input name="address" value="${esc(r.address||"")}"></label><label class="field-full">Notas internas<textarea name="notes">${esc(r.notes||"")}</textarea></label>${save}`};
-    if(type==="project")return{title:r.id?"Editar proyecto":"Nuevo proyecto",html:`<label>Nombre del proyecto<input name="title" required value="${esc(r.title||"")}"></label><label>Empresa<select name="company_id" required><option value="">Seleccionar</option>${optionList(state.companies,"id","name",r.company_id)}</select></label><label>Tipo de trabajo<input name="work_type" required value="${esc(r.work_type||"")}" placeholder="Web Design & Development"></label><label>Responsable<select name="assigned_to" required>${optionList(state.users.filter(u=>u.active),"id","full_name",r.assigned_to||(!isAdmin()?state.profile.id:""))}</select></label><label>Estado<select name="status">${statusOptions(r.status||"not_started")}</select></label><label>Moneda<select name="currency">${currencyOptions(r.currency||"USD")}</select></label><label>Monto acordado<input name="quoted_amount" type="number" min="0" step="0.01" value="${r.quoted_amount||0}"></label><label>Pagado por el cliente<input name="client_paid" type="number" min="0" step="0.01" value="${r.client_paid||0}"></label><label>Fecha de inicio<input name="start_date" type="date" value="${r.start_date||today()}"></label><label>Fecha límite<input name="due_date" type="date" value="${r.due_date||""}"></label><label class="field-full">Descripción<textarea name="description">${esc(r.description||"")}</textarea></label><label class="field-full">Notas internas<textarea name="notes">${esc(r.notes||"")}</textarea></label>${save}`};
+    if(type==="project")return{title:r.id?"Editar proyecto":"Nuevo proyecto",html:`<label>Nombre del proyecto<input name="title" required value="${esc(r.title||"")}"></label><label>Empresa<select name="company_id" required><option value="">Seleccionar</option>${optionList(state.companies,"id","name",r.company_id)}</select></label><label>Tipo de trabajo<input name="work_type" required value="${esc(r.work_type||"")}" placeholder="Web Design & Development"></label><label>Responsable<select name="assigned_to" required>${optionList(state.users.filter(u=>u.active),"id","full_name",r.assigned_to||(!isAdmin()?state.profile.id:""))}</select></label><label>Estado<select name="status">${statusOptions(r.status||"not_started")}</select></label><label>Moneda<select name="currency">${currencyOptions(r.currency||"USD")}</select></label><label>Monto acordado con el cliente<input name="quoted_amount" type="number" min="0" step="0.01" value="${r.quoted_amount||0}"></label><label>Cobrado al cliente<input name="client_paid" type="number" min="0" step="0.01" value="${r.client_paid||0}"></label><label>Monto acordado con el colaborador<input name="collaborator_budget" type="number" min="0" step="0.01" value="${r.collaborator_budget||0}"></label><label>Fecha de inicio<input name="start_date" type="date" value="${r.start_date||today()}"></label><label>Fecha límite<input name="due_date" type="date" value="${r.due_date||""}"></label><label class="field-full">Descripción<textarea name="description">${esc(r.description||"")}</textarea></label><label class="field-full">Notas internas<textarea name="notes">${esc(r.notes||"")}</textarea></label>${save}`};
     if(type==="extra")return{title:r.id?"Editar extra":"Agregar extra",html:`<label>Proyecto<select name="project_id" required>${optionList(state.projects,"id","title",r.project_id)}</select></label><label>Responsable<select name="assigned_to" required>${optionList(state.users.filter(u=>u.active),"id","full_name",r.assigned_to)}</select></label><label>Nombre del extra<input name="title" required value="${esc(r.title||"")}"></label><label>Fecha<input name="extra_date" type="date" value="${r.extra_date||today()}"></label><label>Precio cobrado al cliente<input name="client_price" type="number" min="0" step="0.01" required value="${r.client_price||0}"></label><label>Monto para el colaborador<input name="collaborator_amount" type="number" min="0" step="0.01" required value="${r.collaborator_amount||0}"></label><label>Moneda<select name="currency">${currencyOptions(r.currency||"USD")}</select></label><label>Estado de cobro<select name="client_status"><option value="pending" ${r.client_status!=="paid"?"selected":""}>Pendiente</option><option value="paid" ${r.client_status==="paid"?"selected":""}>Pagado</option></select></label><label>Cobrar al cliente<select name="billable_to_client"><option value="true" ${r.billable_to_client!==false?"selected":""}>Sí</option><option value="false" ${r.billable_to_client===false?"selected":""}>No</option></select></label><label class="field-full">Descripción<textarea name="description">${esc(r.description||"")}</textarea></label><label class="field-full">Notas<textarea name="notes">${esc(r.notes||"")}</textarea></label>${save}`};
     if(type==="payment")return{title:r.id?"Editar pago":"Registrar pago",html:`<label>Colaborador<select name="collaborator_id" required>${optionList(state.users.filter(u=>u.active),"id","full_name",r.collaborator_id)}</select></label><label>Proyecto<select name="project_id"><option value="">Sin proyecto</option>${optionList(state.projects,"id","title",r.project_id)}</select></label><label>Concepto<input name="concept" required value="${esc(r.concept||"")}"></label><label>Monto<input name="amount" type="number" min="0" step="0.01" required value="${r.amount||0}"></label><label>Moneda<select name="currency">${currencyOptions(r.currency||"USD")}</select></label><label>Método de pago<select name="payment_method">${paymentMethodOptions(r.payment_method)}</select></label><label>Estado<select name="status">${paymentStatusOptions(r.status)}</select></label><label>Comprobante o referencia (texto)<input name="reference" value="${esc(r.reference||"")}"></label><label>Vencimiento<input name="due_date" type="date" value="${r.due_date||""}"></label><label>Fecha de pago<input name="paid_date" type="date" value="${r.paid_date||""}"></label><label class="field-full">Adjuntar comprobante (foto, PDF o Excel)<input type="file" name="receipt_file" accept="image/*,.pdf,.xlsx,.xls,.csv"></label>${r.receipt_name?`<p class="field-full muted">Comprobante actual: ${esc(r.receipt_name)} — <button type="button" class="link-button" data-action="view-receipt" data-id="${r.id}">ver</button>. Elige otro archivo arriba para reemplazarlo.</p>`:""}<label class="field-full">Notas<textarea name="notes">${esc(r.notes||"")}</textarea></label>${save}`};
     if(type==="user"){
@@ -643,7 +671,7 @@
       const receiptFile = type==="payment" ? formData.get("receipt_file") : null;
       formData.delete("receipt_file");
       const form=Object.fromEntries(formData.entries());
-      ["quoted_amount","client_paid","amount","client_price","collaborator_amount"].forEach(k=>{if(k in form)form[k]=Number(form[k]||0)});
+      ["quoted_amount","client_paid","amount","client_price","collaborator_amount","collaborator_budget"].forEach(k=>{if(k in form)form[k]=Number(form[k]||0)});
       // Los campos de fecha y las referencias opcionales (ej. "Sin proyecto") llegan como
       // cadena vacía "" desde el formulario, pero Postgres rechaza "" para columnas date/uuid.
       // Los convertimos a null para que se guarden correctamente como "sin valor".
@@ -664,6 +692,11 @@
       if(type==="payment" && receiptFile && receiptFile.size>0) {
         const paymentId = id || savedId;
         if (paymentId) await db.uploadReceipt(paymentId,receiptFile);
+      }
+      if(type==="payment") {
+        const amountLabel = formatMoney(form.amount, form.currency||"USD").replace(/<[^>]*>/g,"").trim();
+        if(!id) notify(form.collaborator_id, `Se registró un pago de ${amountLabel} para ti (${form.concept}).`);
+        else if(form.status==="paid") notify(form.collaborator_id, `Tu pago de ${amountLabel} (${form.concept}) fue marcado como pagado.`);
       }
       await logActivity(`${id?"Actualizó":"Creó"} ${typeLabel(type)}${form.title?`: ${form.title}`:""}`);
       closeModal(); await refreshData(); renderCurrentView(); toast("Cambios guardados correctamente.");
