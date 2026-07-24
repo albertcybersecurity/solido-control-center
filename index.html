@@ -1,0 +1,308 @@
+<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <meta name="theme-color" content="#063f2a" />
+  <title>Sólido Control Center</title>
+  <meta name="description" content="Panel privado para controlar empresas, proyectos, extras y pagos de Sólido Business Group." />
+  <link rel="stylesheet" href="assets/styles.css" />
+</head>
+<body>
+  <div id="toastStack" class="toast-stack" aria-live="polite"></div>
+
+  <section id="authScreen" class="auth-screen">
+    <div class="auth-visual">
+      <div class="auth-overlay"></div>
+      <img src="assets/solido-logo.jpeg" alt="Sólido Business Group" class="auth-logo" />
+      <div class="auth-copy">
+        <span class="eyebrow">Private operations platform</span>
+        <h1>Control de proyectos, extras y pagos en un solo lugar.</h1>
+        <p>Acceso privado para administración y colaboradores, con información separada por usuario.</p>
+      </div>
+    </div>
+
+    <div class="auth-panel">
+      <div class="auth-card">
+        <div class="mobile-brand">
+          <img src="assets/solido-logo.jpeg" alt="Sólido Business Group" />
+        </div>
+        <form id="loginForm" class="auth-form active production-login">
+          <div>
+            <h2>Acceso privado</h2>
+            <p>Ingresa con tu nombre de usuario y contraseña.</p>
+          </div>
+          <label>Usuario
+            <input id="loginUsername" type="text" autocomplete="username" required placeholder="daniel.perez" pattern="[a-zA-Z0-9._-]+" />
+          </label>
+          <label>Contraseña
+            <div class="password-wrap">
+              <input id="loginPassword" type="password" autocomplete="current-password" required placeholder="••••••••" />
+              <button type="button" class="ghost-icon" data-toggle-password="loginPassword" aria-label="Mostrar contraseña">◉</button>
+            </div>
+          </label>
+          <button class="btn primary full" type="submit">Ingresar</button>
+          <button type="button" id="showForgotBtn" class="link-button">¿Olvidaste tu contraseña?</button>
+          <p class="auth-help">Para crear una cuenta, comunícate con uno de los administradores.</p>
+          <div id="setupNotice" class="demo-box hidden"></div>
+        </form>
+
+        <form id="forgotForm" class="auth-form">
+          <div>
+            <h2>Recuperar acceso</h2>
+            <p>Escribe tu nombre de usuario. Si existe una cuenta activa, te enviaremos un enlace seguro al correo registrado.</p>
+          </div>
+          <label>Usuario
+            <input id="forgotUsername" type="text" required placeholder="daniel.perez" pattern="[a-zA-Z0-9._-]+" />
+          </label>
+          <button class="btn primary full" type="submit">Enviar enlace de recuperación</button>
+          <button type="button" id="backToLoginBtn" class="link-button">Volver al inicio de sesión</button>
+        </form>
+
+        <form id="recoverForm" class="auth-form">
+          <div>
+            <h2>Crear nueva contraseña</h2>
+            <p>Este enlace es de un solo uso. Define una nueva contraseña para tu cuenta.</p>
+          </div>
+          <label>Nueva contraseña
+            <input id="recoverPassword" type="password" minlength="8" required placeholder="Mínimo 8 caracteres" />
+          </label>
+          <label>Confirmar contraseña
+            <input id="recoverPasswordConfirm" type="password" minlength="8" required placeholder="Repetir contraseña" />
+          </label>
+          <button class="btn primary full" type="submit">Guardar nueva contraseña</button>
+        </form>
+
+        <div class="auth-footer">
+          <span id="modeBadge" class="mode-badge">Conexión segura</span>
+          <span>© 2026 Sólido Business Group</span>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section id="appShell" class="app-shell hidden">
+    <aside class="sidebar" id="sidebar">
+      <div class="brand-block">
+        <img src="assets/solido-logo.jpeg" alt="Sólido Business Group" />
+        <div>
+          <strong>Sólido Control</strong>
+          <span>Business Operations</span>
+        </div>
+      </div>
+
+      <nav class="nav-list" id="mainNav">
+        <button class="nav-item active" data-view="dashboard"><span>▦</span> Dashboard</button>
+        <button class="nav-item" data-view="companies"><span>▣</span> Empresas</button>
+        <button class="nav-item" data-view="projects"><span>◆</span> Proyectos</button>
+        <button class="nav-item" data-view="extras"><span>＋</span> Extras</button>
+        <button class="nav-item" data-view="payments"><span>$</span> Pagos</button>
+        <button class="nav-item admin-only" data-view="users"><span>◉</span> Usuarios y permisos</button>
+        <button class="nav-item" data-view="account"><span>⚙</span> Mi cuenta</button>
+      </nav>
+
+      <div class="sidebar-bottom">
+        <button id="exportBackupBtn" class="sidebar-action admin-only">↓ Exportar respaldo</button>
+        <button id="logoutBtn" class="sidebar-action danger">Cerrar sesión</button>
+      </div>
+    </aside>
+
+    <main class="main-area">
+      <header class="topbar">
+        <button id="sidebarToggle" class="icon-button mobile-only" aria-label="Abrir menú">☰</button>
+        <div>
+          <span class="top-kicker" id="viewKicker">Resumen general</span>
+          <h1 id="viewTitle">Dashboard</h1>
+        </div>
+        <div class="top-actions">
+          <button id="quickAddBtn" class="btn outline admin-only">＋ Nuevo</button>
+          <button id="userMenuBtn" class="user-chip">
+            <span class="avatar" id="headerAvatar">YP</span>
+            <span class="user-chip-copy">
+              <strong id="headerUserName">Yini Puleo</strong>
+              <small id="headerUserRole">Administrator</small>
+            </span>
+          </button>
+        </div>
+      </header>
+
+      <div class="content-wrap">
+        <section id="view-dashboard" class="view active">
+          <div class="hero-card">
+            <div>
+              <span class="eyebrow light">Operations overview</span>
+              <h2 id="welcomeHeading">Hola, Yini.</h2>
+              <p id="welcomeText">Aquí tienes el estado actualizado del negocio, proyectos y pagos.</p>
+            </div>
+            <div class="hero-orbit">
+              <div class="orbit-dot"></div>
+              <div class="orbit-arrow">↗</div>
+            </div>
+          </div>
+
+          <div class="stats-grid" id="statsGrid"></div>
+
+          <div class="dashboard-grid">
+            <article class="panel span-2">
+              <div class="panel-head">
+                <div>
+                  <span class="panel-kicker">Projects pipeline</span>
+                  <h3>Proyectos por estado</h3>
+                </div>
+                <button class="text-action" data-go-view="projects">Ver todos</button>
+              </div>
+              <div id="pipelineChart" class="pipeline-chart"></div>
+            </article>
+
+            <article class="panel">
+              <div class="panel-head">
+                <div>
+                  <span class="panel-kicker">Payments</span>
+                  <h3>Pagos pendientes</h3>
+                </div>
+              </div>
+              <div id="pendingPaymentsList" class="mini-list"></div>
+            </article>
+
+            <article class="panel admin-only">
+              <div class="panel-head">
+                <div>
+                  <span class="panel-kicker">Team</span>
+                  <h3>Proyectos por colaborador</h3>
+                </div>
+              </div>
+              <div id="collaboratorBreakdown" class="pipeline-chart"></div>
+            </article>
+
+            <article class="panel span-2">
+              <div class="panel-head">
+                <div>
+                  <span class="panel-kicker">Recent work</span>
+                  <h3>Actividad reciente</h3>
+                </div>
+              </div>
+              <div id="activityList" class="activity-list"></div>
+            </article>
+
+            <article class="panel">
+              <div class="panel-head">
+                <div>
+                  <span class="panel-kicker">Deadlines</span>
+                  <h3>Próximos vencimientos</h3>
+                </div>
+              </div>
+              <div id="deadlinesList" class="mini-list"></div>
+            </article>
+          </div>
+        </section>
+
+        <section id="view-companies" class="view">
+          <div class="section-head">
+            <div><span class="eyebrow">Client database</span><h2>Empresas y clientes</h2><p>Contactos y proyectos vinculados a cada empresa.</p></div>
+            <button class="btn primary admin-only" data-open-modal="company">＋ Agregar empresa</button>
+          </div>
+          <div class="toolbar">
+            <input id="companySearch" class="search-input" placeholder="Buscar empresa, contacto o correo…" />
+          </div>
+          <div id="companiesGrid" class="cards-grid"></div>
+        </section>
+
+        <section id="view-projects" class="view">
+          <div class="section-head">
+            <div><span class="eyebrow">Work control</span><h2>Proyectos</h2><p>Inicio, desarrollo, cierre, cobro y responsable asignado.</p></div>
+            <button class="btn primary admin-only" data-open-modal="project">＋ Nuevo proyecto</button>
+          </div>
+          <div class="toolbar multi wrap">
+            <input id="projectSearch" class="search-input" placeholder="Buscar por proyecto o empresa…" />
+            <select id="projectCompanyFilter"><option value="all">Todas las empresas</option></select>
+            <select id="projectStatusFilter"><option value="all">Todos los estados</option></select>
+            <select id="projectAssigneeFilter" class="admin-only"><option value="all">Todos los colaboradores</option></select>
+            <select id="projectWorkTypeFilter"><option value="all">Todos los tipos de trabajo</option></select>
+            <select id="projectCurrencyFilter"><option value="all">Todas las monedas</option><option value="USD">USD</option><option value="ARS">ARS</option></select>
+            <label class="filter-date">Desde<input id="projectDateFrom" type="date" /></label>
+            <label class="filter-date">Hasta<input id="projectDateTo" type="date" /></label>
+          </div>
+          <div class="table-wrap"><table><thead><tr><th>Proyecto</th><th>Empresa</th><th>Responsable</th><th>Estado</th><th>Monto</th><th>Fecha límite</th><th></th></tr></thead><tbody id="projectsTable"></tbody></table></div>
+        </section>
+
+        <section id="view-extras" class="view">
+          <div class="section-head">
+            <div><span class="eyebrow">Additional work</span><h2>Extras de proyectos</h2><p>Trabajos añadidos, costos adicionales y estado de cobro.</p></div>
+            <button class="btn primary admin-only" data-open-modal="extra">＋ Agregar extra</button>
+          </div>
+          <div class="toolbar multi wrap">
+            <input id="extraSearch" class="search-input" placeholder="Buscar extra o proyecto…" />
+            <select id="extraStatusFilter"><option value="all">Todos</option><option value="pending">Pendientes</option><option value="paid">Pagados</option></select>
+            <select id="extraCurrencyFilter"><option value="all">Todas las monedas</option><option value="USD">USD</option><option value="ARS">ARS</option></select>
+          </div>
+          <div id="extrasGrid" class="cards-grid compact"></div>
+        </section>
+
+        <section id="view-payments" class="view">
+          <div class="section-head">
+            <div><span class="eyebrow">Private payroll</span><h2 id="paymentsHeading">Pagos a colaboradores</h2><p id="paymentsSubheading">Control privado de pagos pendientes y realizados.</p></div>
+            <button class="btn primary admin-only" data-open-modal="payment">＋ Registrar pago</button>
+          </div>
+          <div class="toolbar multi wrap">
+            <input id="paymentSearch" class="search-input" placeholder="Buscar concepto o proyecto…" />
+            <select id="paymentStatusFilter"><option value="all">Todos</option><option value="pending">Pendientes</option><option value="partial">Parciales</option><option value="paid">Pagados</option></select>
+            <select id="paymentUserFilter" class="admin-only"><option value="all">Todos los colaboradores</option></select>
+            <select id="paymentCurrencyFilter"><option value="all">Todas las monedas</option><option value="USD">USD</option><option value="ARS">ARS</option></select>
+            <label class="filter-date">Desde<input id="paymentDateFrom" type="date" /></label>
+            <label class="filter-date">Hasta<input id="paymentDateTo" type="date" /></label>
+          </div>
+          <div id="paymentSummary" class="payment-summary"></div>
+          <div class="table-wrap"><table><thead><tr><th>Colaborador</th><th>Concepto</th><th>Proyecto</th><th>Monto</th><th>Estado</th><th>Vencimiento</th><th></th></tr></thead><tbody id="paymentsTable"></tbody></table></div>
+        </section>
+
+        <section id="view-users" class="view admin-only">
+          <div class="section-head">
+            <div><span class="eyebrow">Access control</span><h2>Usuarios y permisos</h2><p>Administradores y colaboradores con acceso privado según su rol.</p></div>
+            <button class="btn primary" data-open-modal="user">＋ Crear usuario</button>
+          </div>
+          <div id="usersGrid" class="cards-grid"></div>
+        </section>
+
+        <section id="view-account" class="view">
+          <div class="section-head"><div><span class="eyebrow">Security & profile</span><h2>Mi cuenta</h2><p>Datos personales, contraseña y sesión.</p></div></div>
+          <div class="account-grid">
+            <article class="panel">
+              <div class="profile-block">
+                <span class="avatar xl" id="accountAvatar">YP</span>
+                <div><h3 id="accountName">Yini Puleo</h3><p id="accountTitle">Administrator</p><span class="status-chip active">Cuenta activa</span></div>
+              </div>
+              <div class="profile-data" id="profileData"></div>
+            </article>
+            <article class="panel">
+              <div class="panel-head"><div><span class="panel-kicker">Password</span><h3>Cambiar contraseña</h3></div></div>
+              <form id="changePasswordForm" class="form-stack">
+                <label>Nueva contraseña<input id="newPassword" type="password" minlength="8" required placeholder="Mínimo 8 caracteres" /></label>
+                <label>Confirmar contraseña<input id="confirmPassword" type="password" minlength="8" required placeholder="Repetir contraseña" /></label>
+                <button class="btn primary" type="submit">Actualizar contraseña</button>
+              </form>
+            </article>
+            <article class="panel admin-only span-2">
+              <div class="panel-head"><div><span class="panel-kicker">Data portability</span><h3>Respaldos</h3></div></div>
+              <p class="muted">Descarga una copia JSON de empresas, proyectos, extras y pagos.</p>
+              <button id="exportBackupBtn2" class="btn outline">Descargar respaldo</button>
+            </article>
+          </div>
+        </section>
+      </div>
+    </main>
+  </section>
+
+  <div id="modalBackdrop" class="modal-backdrop hidden">
+    <div class="modal" role="dialog" aria-modal="true">
+      <div class="modal-head">
+        <div><span class="panel-kicker" id="modalKicker">Nuevo registro</span><h2 id="modalTitle">Agregar</h2></div>
+        <button id="closeModalBtn" class="icon-button">×</button>
+      </div>
+      <form id="modalForm" class="modal-body"></form>
+    </div>
+  </div>
+
+  <script src="assets/config.js"></script>
+  <script src="assets/app.js"></script>
+</body>
+</html>
